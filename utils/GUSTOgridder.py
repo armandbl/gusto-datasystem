@@ -27,7 +27,7 @@ import os,errno
 #from gustoL09P.GL09PDataIO import loadL08Data
 from GUSTO_Pipeline.DataIO import loadSDFITS 
 from multiprocessing import Process, Queue
-from flagdefs import *
+from GUSTO_Pipeline.flagdefs import *
 
 import datetime
 import argparse
@@ -420,9 +420,9 @@ def main(args=None,verbose=True):
     print(args)
     
     #dir = '/Users/umit/Desktop/STO2_etacar5_data-redution/Pipeline_HOTneeded/Gum31_4591-4733/'
-    datadir = '/data/scratch/GUSTO/gusto-datasystem/Data/'
-    dir_level1 = f'{datadir}/level1/{source}/'
-    dir_write = f'{datadir}/level2/{source}/'
+    datadir = 'D:\gusto-datasystem\Data'
+    dir_level1 = f'{datadir}\level1\{source}'
+    dir_write = f'{datadir}\level2\{source}'
     
     vel_spacing = 2.0 # km/s
     

@@ -1,0 +1,20 @@
+# Data folder - large research files
+Data/
+
+# Python & build artifacts
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

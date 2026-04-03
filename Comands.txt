@@ -1,0 +1,7 @@
+Run gridder
+From utils run 
+
+python .\GUSTOgridder.py -b NII -s G337
+
+Run Pipeline basic use
+from GUSTO_pieline run pipeline.py

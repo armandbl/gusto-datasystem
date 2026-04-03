@@ -1,8 +1,8 @@
 """
 This is the GUSTO Pipeline run script.
 """
-from .Logger import *
-from .Configuration import *
+from GUSTO_Pipeline.Logger import *
+from GUSTO_Pipeline.Configuration import *
 from datetime import datetime
 import importlib
 

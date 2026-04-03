@@ -40,3 +40,6 @@ ehthumbs.db
 Thumbs.db
 __pycache__
 GUSTO_Pipeline.egg-info
+
+# Data Folder
+Data/
