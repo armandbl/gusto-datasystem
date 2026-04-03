@@ -12,8 +12,7 @@ def next_nth_run_dir(base_dir: Path) -> Path:
     for child in base_dir.iterdir():
         if not child.is_dir():
             continue
-        match = pattern.match(child.name)
-        if match:
+        if match := pattern.match(child.name):
             max_n = max(max_n, int(match.group(1)))
 
     run_dir = base_dir / f"run {max_n + 1}"
@@ -52,7 +51,7 @@ def main() -> None:
     base_output_dir.mkdir(parents=True, exist_ok=True)
     run_dir = next_nth_run_dir(base_output_dir)
 
-    py_exe = args.python if args.python else "python"
+    py_exe = args.python or "python"
 
     # GUSTOgridder concatenates dir_write + ofile, so use a leading slash to place
     # outputs under Data/level2/<source>/<n>th run/.
