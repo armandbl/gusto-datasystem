@@ -420,9 +420,9 @@ def main(args=None,verbose=True):
     print(args)
     
     #dir = '/Users/umit/Desktop/STO2_etacar5_data-redution/Pipeline_HOTneeded/Gum31_4591-4733/'
-    datadir = 'D:\gusto-datasystem\Data'
-    dir_level1 = f'{datadir}\level1\{source}'
-    dir_write = f'{datadir}\level2\{source}'
+    datadir = '/media/armand/SSD ARMAND/gusto-datasystem/Data'
+    dir_level1 = f'{datadir}/level1/{source}'
+    dir_write = f'{datadir}/level2/{source}'
     
     vel_spacing = 2.0 # km/s
     
