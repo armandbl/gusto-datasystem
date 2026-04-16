@@ -16,7 +16,11 @@ from astropy.time import Time
 from astropy.coordinates import AltAz
 import datetime
 import argparse
-import configargparse
+import importlib
+try:
+    _argparse_backend = importlib.import_module('configargparse')
+except ModuleNotFoundError:
+    _argparse_backend = argparse
 
 
 def get_cal_mixer_offsets(calib_file):
@@ -142,35 +146,35 @@ def update_mixer_offset(foff,hdr0, ra, dec,otime, band, mix, calib_file,verbose=
 def main(args=None,verbose=True):
     if args==None:
         # Create the input parser
-        my_parser = configargparse.ArgumentParser(prog='update_mixer_offset',
+        my_parser = _argparse_backend.ArgumentParser(prog='update_mixer_offset',
                                             usage='%(prog)s filetype directory ',
                                             description='Update RA/DEC positions in GUTSO data file')
         my_parser.version = "Version 0.0.1 (8 Dec 2025) "
         my_parser.add_argument('-v', action='version')
 
-        my_parser.add('-o',
+        my_parser.add_argument('-o',
                                metavar='--foff',
                                nargs = 2, 
                                help = 'scale factor of calibration offsets (AZ, ALT)')
-        my_parser.add('-r',
+        my_parser.add_argument('-r',
                                metavar='--fileroot',
                                type=str,
                                required=True,
                                help='Name of data file to be updated.')
-        my_parser.add('-d',
+        my_parser.add_argument('-d',
                                metavar='--directory',
                                required = False,
                                default = '/data/scratch/GUSTO/gusto-datasystem/Data/level1/',
                                type=str,
                                help='Path to data directory')
 
-        my_parser.add('-c',
+        my_parser.add_argument('-c',
                                metavar='--calib_file',
                                default = '/data/scratch/GUSTO/gusto-datasystem/calib/cal_offsets.txt',
                                type=str,
                                help='Path to calibration directory')
 
-        my_parser.add('-check',
+        my_parser.add_argument('-check',
                                metavar='--checkifdone',
                                default = '0',
                                type=str,
