@@ -1,0 +1,27 @@
+# Example velocity configuration file for measure_offsets_gaussian_fitting.py
+# Format (tab-separated or whitespace):
+#   velocity_kms  [lon_deg  lat_deg  [weight  [x_sigma_pix  [y_sigma_pix  [rho_xy
+#                 [center_max_shift_pix  [theta_max_shift_deg  [fix_shape]]]]]]]]
+#
+# Lines starting with # are ignored. 
+# velocity_kms is REQUIRED.
+# lon_deg, lat_deg (Galactic coordinates) are OPTIONAL. If provided, peak is searched near this hint.
+# weight is OPTIONAL. If provided, used to weight this velocity in final aggregation.
+# x_sigma_pix and y_sigma_pix are OPTIONAL Gaussian sigma priors (in pixels) for this velocity.
+# If only x_sigma_pix is provided, y_sigma_pix defaults to the same value.
+# rho_xy is OPTIONAL correlation factor between x and y in [-1, +1].
+# Positive rho tilts along +x/+y, negative rho tilts along +x/-y.
+# center_max_shift_pix is OPTIONAL per-velocity centroid movement limit (pixels).
+# theta_max_shift_deg is OPTIONAL per-velocity orientation movement limit (degrees).
+# fix_shape is OPTIONAL per-velocity boolean flag (1/0, true/false, yes/no).
+#
+# Examples: 
+#   -20                              # Just velocity, auto-detect peak
+#   -38  -22.5  -23.2               # Velocity with Galactic center hint
+#   -70  -22.5  -23.2  2.0          # Velocity with hint and explicit weight (higher weight = more important)
+#   -70  -22.5  -23.2  2.0  8.0  6.0 # Also set approximate Gaussian size priors
+#   -70  -22.5  -23.2  2.0  8.0  6.0  0.35 # Also set x-y correlation prior
+#   -70  -22.5  -23.2  2.0  8.0  6.0  0.35  10.0  30.0  1 # Also set fit control priors
+
+# G337 NII measurements:
+-74.0    -23.10   -00.10  1.0  05.0  10.0   -0.90  5 0

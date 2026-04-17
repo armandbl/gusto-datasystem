@@ -13,6 +13,7 @@ import math
 from astropy import constants as const
 from grid_otf_optimized import grid_otf
 import sys
+from pathlib import Path
 import warnings
 #from progressbar import ProgressBar
 
@@ -25,13 +26,49 @@ import scipy
 import time
 import os,errno
 #from gustoL09P.GL09PDataIO import loadL08Data
+
+# Allow running this script directly without installing the package.
+SRC_DIR = Path(__file__).resolve().parents[1] / 'src'
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
 from GUSTO_Pipeline.DataIO import loadSDFITS 
 from multiprocessing import Process, Queue
 from GUSTO_Pipeline.flagdefs import *
 
 import datetime
 import argparse
-import configargparse
+
+
+def line_intensity_limits(line_name):
+    """Default display/processing intensity limits in Kelvin-like units."""
+    line_upper = str(line_name).upper()
+    if line_upper == "CII":
+        return -1.0, 6.0
+    if line_upper == "NII":
+        return -1.0, 2.0
+    return None, None
+
+
+def clean_cube_data(cube_data, line_name, auto_rescale=True, clip_to_line_limits=True):
+    """Clean gridded cube data to reduce extreme outliers before writing Level-2 products."""
+    cleaned = np.array(cube_data, dtype=float)
+    cleaned[~np.isfinite(cleaned)] = np.nan
+
+    scale_factor = 1.0
+    finite = cleaned[np.isfinite(cleaned)]
+    if auto_rescale and finite.size > 0:
+        # Some products can arrive in milli-units; convert to unit scale when values are very large.
+        p95_abs = np.nanpercentile(np.abs(finite), 95)
+        if p95_abs > 100.0:
+            cleaned = cleaned / 1000.0
+            scale_factor = 1000.0
+
+    clip_limits = line_intensity_limits(line_name)
+    if clip_to_line_limits and clip_limits[0] is not None and clip_limits[1] is not None:
+        cleaned = np.clip(cleaned, clip_limits[0], clip_limits[1])
+
+    return cleaned, scale_factor, clip_limits
 
 def silentremove(filename):
 # remove files without raising error
@@ -397,6 +434,14 @@ def main(args=None,verbose=True):
                                metavar='--wcsfile',
                                required=False,
                                help='Input fits cube to match WCS if not present the WCS will be made based on input L1 scans')
+        my_parser.add_argument('--no-clean-cube',
+                       action='store_true',
+                       required=False,
+                       help='Disable line-aware output cube cleaning (clipping and auto-rescale).')
+        my_parser.add_argument('--no-auto-rescale',
+                       action='store_true',
+                       required=False,
+                       help='Disable automatic divide-by-1000 rescale when cube intensities are very large.')
 
 
         args = my_parser.parse_args()
@@ -416,9 +461,10 @@ def main(args=None,verbose=True):
     print(args)
     
     #dir = '/Users/umit/Desktop/STO2_etacar5_data-redution/Pipeline_HOTneeded/Gum31_4591-4733/'
-    datadir = '/media/armand/SSD ARMAND/gusto-datasystem/Data'
-    dir_level1 = f'{datadir}/level1/{source}'
-    dir_write = f'{datadir}/level2/{source}'
+    datadir = Path(__file__).resolve().parents[1] / 'Data'
+    dir_level1 = str(datadir / 'level1' / source)
+    dir_write = str(datadir / 'level2' / source)
+    os.makedirs(dir_write, exist_ok=True)
     
     dvNII = 2.0076146439883598  # band 1 native resolution
     dvCII = 0.7709722465531635  # band 2 native resolution
@@ -518,7 +564,29 @@ def main(args=None,verbose=True):
     hdr['CDELT3'] = (vv_in[1]-vv_in[0])
     #
     silentremove(dir_write+f'cube_{line_str}.fits')
-    hdu_cube_out = fits.PrimaryHDU(cube.data, header = hdr)
+
+    do_clean_cube = not args.no_clean_cube
+    auto_rescale = not args.no_auto_rescale
+    cube_out_data = np.array(cube.data, dtype=float)
+    scale_factor = 1.0
+    clip_limits = (None, None)
+
+    if do_clean_cube:
+        cube_out_data, scale_factor, clip_limits = clean_cube_data(
+            cube_out_data,
+            line_str,
+            auto_rescale=auto_rescale,
+            clip_to_line_limits=True,
+        )
+
+    hdr['DATACLR'] = (bool(do_clean_cube), 'True if output cube values were cleaned')
+    hdr['AUTOSCL'] = (bool(auto_rescale), 'True if auto-rescale check was enabled')
+    hdr['SCLFACT'] = (float(scale_factor), 'Applied intensity scale factor before writing')
+    if clip_limits[0] is not None and clip_limits[1] is not None:
+        hdr['CLIPMIN'] = (float(clip_limits[0]), 'Applied output clip minimum')
+        hdr['CLIPMAX'] = (float(clip_limits[1]), 'Applied output clip maximum')
+
+    hdu_cube_out = fits.PrimaryHDU(cube_out_data, header = hdr)
     if ofile == None:
         outcube = dir_write+f'{source}_{line_str}_{mx}_at_{beam_fwhm*60:0.2}_{KT}.fits'
     else:

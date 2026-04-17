@@ -5,3 +5,12 @@ python .\GUSTOgridder.py -b NII -s G337
 
 Run Pipeline basic use
 from GUSTO_pieline run pipeline.py
+
+
+Run gridder batch
+python utils/run_gusto_gridder_batch.py -s G337 --vmin -160 --vmax 0 --beam 1.0
+
+Run slices 
+python utils/extract_cube_slices_png.py --source G337 --run 3 --velocities -70 -38 -40 -100 -20 -120 -74 -64 -122 
+
+Run measure fits

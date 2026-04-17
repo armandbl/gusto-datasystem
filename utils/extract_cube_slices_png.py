@@ -74,7 +74,7 @@ def mixer_from_filename(file_path: Path) -> str | None:
 
 def scales_for_line(line: str) -> tuple[float, float]:
     if line == "CII":
-        return -2.0, 6.0
+        return -1.0, 6.0
     if line == "NII":
         return -1.0, 2.0
     raise ValueError(f"Unknown line type: {line}")

@@ -1,6 +1,6 @@
 path = D:\gusto-datasystem\Data
 band = [1, 2]
-cpus = 4
+cpus = 16
 scanid = [4000, 8000]
 level = 1.0
 polyorder = 3

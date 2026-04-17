@@ -29,7 +29,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run GUSTOgridder for fixed mixer/line sequence with shared WCS reference file."
     )
-    parser.add_argument("--source", default="G337", help="Source name passed to GUSTOgridder -s")
+    parser.add_argument("-s","--source", default="G337", help="Source name passed to GUSTOgridder -s")
     parser.add_argument("--vmin", type=float, default=-160.0, help="Minimum velocity for -l")
     parser.add_argument("--vmax", type=float, default=0.0, help="Maximum velocity for -l")
     parser.add_argument("--beam", type=float, default=1.0, help="Beam FWHM in arcmin for -Beam")
@@ -56,7 +56,7 @@ def main() -> None:
     # GUSTOgridder concatenates dir_write + ofile, so use a leading slash to place
     # outputs under Data/level2/<source>/<n>th run/.
     first_output = run_dir / f"{args.source}_CII_8_reference.fits"
-    first_ofile = f"\\{run_dir.name}\\{first_output.name}"
+    first_ofile = f"/{run_dir.name}/{first_output.name}"
 
     base_args = [
         "-s",
@@ -82,7 +82,7 @@ def main() -> None:
     run_command(first_cmd, cwd=script_dir)
 
     jobs = [
-        ("CII", "6"),
+        ("CII", "5"),
         ("CII", "0"),
         ("NII", "2"),
         ("NII", "3"),
@@ -93,7 +93,7 @@ def main() -> None:
     for line, mixer in jobs:
         out_name = f"{args.source}_{line}_{mixer}_matched.fits"
         out_path = run_dir / out_name
-        ofile = f"\\{run_dir.name}\\{out_name}"
+        ofile = f"/{run_dir.name}/{out_name}"
 
         cmd = [ py_exe, str(gridder), "-b", line, *base_args, "-f", str(first_output), "-x", mixer, "-o", ofile ]
         run_command(cmd, cwd=script_dir)
