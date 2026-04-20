@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 from astropy.io import fits
 import matplotlib
+from GUSTOgridder import line_intensity_limits
 
 # Force non-interactive backend so this works in terminal sessions.
 matplotlib.use("Agg")
@@ -71,15 +72,6 @@ def mixer_from_filename(file_path: Path) -> str | None:
         return None
     return match.group(1)
 
-
-def scales_for_line(line: str) -> tuple[float, float]:
-    if line == "CII":
-        return -1.0, 6.0
-    if line == "NII":
-        return -1.0, 2.0
-    raise ValueError(f"Unknown line type: {line}")
-
-
 def velocity_label(value: float) -> str:
     return f"{value:+06.1f}".replace("+", "p").replace("-", "m")
 
@@ -136,7 +128,7 @@ def extract_slice_frame(cube_path: Path, target_vel: float) -> tuple[str, str, f
     actual_vel = float(vel_axis[idx])
     frame = np.array(data[idx, :, :], dtype=float)
 
-    return line, mixer, actual_vel, frame, *scales_for_line(line), header
+    return line, mixer, actual_vel, frame, *line_intensity_limits(line), header
 
 
 def save_velocity_slice_png(cube_path: Path, velocities: list[float]) -> list[Path]:
@@ -144,7 +136,7 @@ def save_velocity_slice_png(cube_path: Path, velocities: list[float]) -> list[Pa
     if line is None:
         raise ValueError(f"Could not determine line (CII/NII) from filename {cube_path.name}")
 
-    vmin, vmax = scales_for_line(line)
+    vmin, vmax = line_intensity_limits(line)
     created = []
 
     for target_vel in velocities:
