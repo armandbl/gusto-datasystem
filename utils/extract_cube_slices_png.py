@@ -240,7 +240,11 @@ def main() -> None:
             "Extract velocity slices from GUSTOgridder cubes and save PNG previews in the run directory."
         )
     )
-    parser.add_argument("--source", default="G337", help="Source under Data/level2")
+    parser.add_argument(
+        "--source", 
+        default="G337",
+        help="Source under Data/level2"
+    )
     parser.add_argument(
         "--run",
         default="latest",

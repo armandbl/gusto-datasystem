@@ -1,0 +1,17 @@
+{
+  "data_root": "Data/level2",
+  "offsets_file": "src/GUSTO_Pipeline/calib/offsets.txt",
+  "run": "latest",
+  "max_residual_deg": 0.5,
+  "csv_output": "Data/level2/crosscorr_offsets_results.csv",
+  "line_targets": {
+    "CII": {
+      "target_mixer": 8,
+      "mixers": [5]
+    },
+    "NII": {
+      "target_mixer": 2,
+      "mixers": [3, 6]
+    }
+  }
+}
