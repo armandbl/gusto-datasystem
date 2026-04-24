@@ -51,12 +51,26 @@ class JobResult:
 
 
 def find_latest_run_dir(source_dir: Path, run_selector: str) -> Path:
+    """Resolve the run directory to use for a source.
+
+    Args:
+        source_dir: Directory containing run subdirectories for one source.
+        run_selector: Either a specific run number or the string "latest".
+
+    Returns:
+        The path to the selected run directory.
+
+    Raises:
+        FileNotFoundError: If the requested run directory does not exist or no
+            run directories are available.
+    """
     if run_selector.lower() != "latest":
         run_dir = source_dir / f"run {run_selector}"
         if not run_dir.exists():
             raise FileNotFoundError(f"Run directory not found: {run_dir}")
         return run_dir
 
+    # Scan all run folders and choose the highest numbered one.
     runs: list[tuple[int, Path]] = []
     for child in source_dir.iterdir():
         if not child.is_dir():
@@ -70,6 +84,15 @@ def find_latest_run_dir(source_dir: Path, run_selector: str) -> Path:
 
 
 def parse_line_and_mixer_from_name(file_path: Path) -> tuple[str | None, int | None]:
+    """Extract the spectral line and mixer number from a FITS filename.
+
+    Args:
+        file_path: FITS file path to inspect.
+
+    Returns:
+        A tuple of ``(line, mixer)`` where each value may be ``None`` if it
+        cannot be inferred from the filename.
+    """
     tokens = file_path.stem.split("_")
     for i, tok in enumerate(tokens):
         up = tok.upper()
@@ -91,6 +114,19 @@ def parse_line_and_mixer_from_name(file_path: Path) -> tuple[str | None, int | N
 
 
 def select_cube(run_dir: Path, line: str, mixer: int) -> Path:
+    """Pick the FITS cube that matches a line and mixer in one run folder.
+
+    Args:
+        run_dir: The run directory containing FITS cubes.
+        line: Spectral line name, such as ``CII`` or ``NII``.
+        mixer: Mixer number to select.
+
+    Returns:
+        The path to the selected FITS cube.
+
+    Raises:
+        FileNotFoundError: If no matching cube exists in the run directory.
+    """
     line = line.upper()
     fits_files = sorted(run_dir.glob("*.fits"))
     candidates: list[Path] = []
@@ -121,6 +157,17 @@ def select_cube(run_dir: Path, line: str, mixer: int) -> Path:
 
 
 def load_cube(path: Path) -> tuple[np.ndarray, fits.Header]:
+    """Load a FITS cube and return its data and header.
+
+    Args:
+        path: FITS file path to load.
+
+    Returns:
+        A tuple containing the cube data as a float array and the FITS header.
+
+    Raises:
+        ValueError: If the loaded primary data is not three-dimensional.
+    """
     with fits.open(path) as hdul:
         primary = hdul[0]
         data = np.squeeze(cast(Any, primary).data)
@@ -131,11 +178,27 @@ def load_cube(path: Path) -> tuple[np.ndarray, fits.Header]:
 
 
 def build_integrated_map(cube: np.ndarray) -> np.ndarray:
+    """Collapse a cube into a 2D map by averaging over the channel axis.
+
+    Args:
+        cube: Three-dimensional FITS cube with channel, y, x axes.
+
+    Returns:
+        A 2D integrated map used for registration.
+    """
     # Integrate all velocity channels for first-pass robust registration.
     return np.nanmean(cube, axis=0)
 
 
 def prep_map(image: np.ndarray) -> np.ndarray:
+    """Normalize an image before cross-correlation.
+
+    Args:
+        image: 2D map to prepare for correlation.
+
+    Returns:
+        A float array with the median removed and non-finite values replaced by 0.
+    """
     out = np.array(image, dtype=float)
     median = np.nanmedian(out)
     if np.isfinite(median):
@@ -145,6 +208,19 @@ def prep_map(image: np.ndarray) -> np.ndarray:
 
 
 def mean_absolute_residual_from_cube(cube: np.ndarray) -> tuple[float, float, np.ndarray]:
+    """Compute residual statistics for a 3D residual cube.
+
+    Args:
+        cube: Residual cube with channel, y, x axes.
+
+    Returns:
+        A tuple containing the mean absolute residual over all finite pixels,
+        the mean of the per-frame mean absolute residuals, and the array of
+        per-frame means.
+
+    Raises:
+        ValueError: If the cube is not 3D or contains no finite residual values.
+    """
     if cube.ndim != 3:
         raise ValueError(f"Expected 3D cube for residual scoring, got shape={cube.shape}")
 
@@ -169,6 +245,16 @@ def mean_absolute_residual_from_cube(cube: np.ndarray) -> tuple[float, float, np
 
 
 def header_float(header: fits.Header, key: str, default: float = 0.0) -> float:
+    """Read a FITS header value as ``float`` with a fallback default.
+
+    Args:
+        header: FITS header to read from.
+        key: Header keyword to look up.
+        default: Value to return when the header entry is missing or invalid.
+
+    Returns:
+        The parsed floating-point header value or ``default``.
+    """
     value = header.get(key, default)
     try:
         return float(cast(Any, value))
@@ -177,6 +263,17 @@ def header_float(header: fits.Header, key: str, default: float = 0.0) -> float:
 
 
 def measure_shift_integer(reference_map: np.ndarray, target_map: np.ndarray) -> tuple[int, int, np.ndarray]:
+    """Measure the integer-pixel shift between two maps with FFT correlation.
+
+    Args:
+        reference_map: The map to align to.
+        target_map: The map that will be shifted to match the reference.
+
+    Returns:
+        A tuple of ``(shift_x, shift_y, correlation_map)`` where the shifts are
+        the lag needed to align target to reference and the correlation map is
+        the full cross-correlation surface.
+    """
     # FFT-based cross-correlation scales much better than direct correlate2d on large maps.
     ref = prep_map(reference_map)
     tgt = prep_map(target_map)
@@ -191,6 +288,17 @@ def measure_shift_integer(reference_map: np.ndarray, target_map: np.ndarray) -> 
 
 
 def shift2d_no_wrap(image: np.ndarray, shift_x: int, shift_y: int, fill_value: float = np.nan) -> np.ndarray:
+    """Shift a 2D image without wraparound.
+
+    Args:
+        image: 2D array to shift.
+        shift_x: Pixel shift along the x axis.
+        shift_y: Pixel shift along the y axis.
+        fill_value: Value used to fill regions that move out of bounds.
+
+    Returns:
+        The shifted 2D array with out-of-overlap pixels filled.
+    """
     ny, nx = image.shape
     out = np.full((ny, nx), fill_value, dtype=float)
 
@@ -211,6 +319,16 @@ def shift2d_no_wrap(image: np.ndarray, shift_x: int, shift_y: int, fill_value: f
 
 
 def shift3d_no_wrap(cube: np.ndarray, shift_x: int, shift_y: int) -> np.ndarray:
+    """Shift every channel in a cube by the same integer offset.
+
+    Args:
+        cube: 3D array with channel, y, x axes.
+        shift_x: Pixel shift along the x axis.
+        shift_y: Pixel shift along the y axis.
+
+    Returns:
+        A shifted cube with the same shape as the input.
+    """
     shifted = np.empty_like(cube, dtype=float)
     for chan in range(cube.shape[0]):
         shifted[chan] = shift2d_no_wrap(cube[chan], shift_x, shift_y)
@@ -218,6 +336,17 @@ def shift3d_no_wrap(cube: np.ndarray, shift_x: int, shift_y: int) -> np.ndarray:
 
 
 def update_offsets_file(offsets_file: Path, pix_label: str, az_deg: float, el_deg: float) -> None:
+    """Insert or replace an AS_MEASURED offset entry in the calibration table.
+
+    Args:
+        offsets_file: Calibration offsets text file to update.
+        pix_label: Mixer label such as ``B2M5``.
+        az_deg: Measured AZ offset in degrees.
+        el_deg: Measured EL offset in degrees.
+
+    Returns:
+        ``None``. The offsets file is updated in place.
+    """
     lines = offsets_file.read_text(encoding="utf-8").splitlines()
     new_line = f"{pix_label}\t{az_deg:.6f}\t{el_deg:.6f}\tAS_MEASURED"
 
@@ -253,6 +382,16 @@ def update_offsets_file(offsets_file: Path, pix_label: str, az_deg: float, el_de
 
 
 def save_correlation_png(corr: np.ndarray, out_path: Path, title: str) -> None:
+    """Render and save a correlation map as a PNG image.
+
+    Args:
+        corr: 2D cross-correlation surface.
+        out_path: Output path for the PNG file.
+        title: Figure title to show in the saved image.
+
+    Returns:
+        ``None``. The image is written to ``out_path``.
+    """
     fig = plt.figure(figsize=(7, 6), dpi=140)
     ax = fig.add_subplot(111)
     im = ax.imshow(corr, origin="lower", cmap="viridis", aspect="auto")
@@ -266,22 +405,55 @@ def save_correlation_png(corr: np.ndarray, out_path: Path, title: str) -> None:
 
 
 def pix_label_from_line_mixer(line: str, mixer: int) -> str:
+    """Convert a spectral line and mixer number into a calibration label.
+
+    Args:
+        line: Spectral line name.
+        mixer: Mixer number.
+
+    Returns:
+        A label such as ``B2M5`` or ``B1M3``.
+    """
     band = "B2" if line.upper() == "CII" else "B1"
     return f"{band}M{mixer}"
 
 
 def list_sources(data_root: Path) -> list[str]:
+    """List source directories available under the data root.
+
+    Args:
+        data_root: Root directory containing per-source subdirectories.
+
+    Returns:
+        Sorted source directory names.
+    """
     sources = [child.name for child in data_root.iterdir() if child.is_dir()]
     return sorted(sources)
 
 
 def compare_dir_for_run(run_dir: Path) -> Path:
+    """Create and return the Compare output directory for a run.
+
+    Args:
+        run_dir: Run directory for one source.
+
+    Returns:
+        The Compare directory path, created if needed.
+    """
     compare_dir = run_dir / "Compare"
     compare_dir.mkdir(parents=True, exist_ok=True)
     return compare_dir
 
 
 def score_residual_fits(residual_fits_path: Path) -> tuple[float, float, np.ndarray]:
+    """Load a residual FITS cube and score it with residual statistics.
+
+    Args:
+        residual_fits_path: Path to a residual FITS cube.
+
+    Returns:
+        The scoring tuple returned by :func:`mean_absolute_residual_from_cube`.
+    """
     cube, _header = load_cube(residual_fits_path)
     mean_abs_pixel_residual, frame_mean_abs_pixel_residual, frame_means = mean_absolute_residual_from_cube(cube)
     return mean_abs_pixel_residual, frame_mean_abs_pixel_residual, frame_means
@@ -292,6 +464,20 @@ def process_job(
     data_root: Path,
     job: Job,
 ) -> JobResult:
+    """Process one source/line/mixer comparison and produce the job result.
+
+    Args:
+        repo_root: Repository root path.
+        data_root: Root directory containing source data.
+        job: Job definition describing the source, line, and mixer pair.
+
+    Returns:
+        A populated :class:`JobResult` containing shift, residual, and output
+        file information.
+
+    Raises:
+        Exception: Propagates any cube selection, loading, or scoring failures.
+    """
     source_dir = data_root / job.source
     run_dir = find_latest_run_dir(source_dir, job.run)
 
@@ -313,6 +499,7 @@ def process_job(
     map_ref = build_integrated_map(ref_cube)
     map_tgt = build_integrated_map(tgt_cube)
 
+    # Measure the integer pixel shift from target to reference.
     lag_x, lag_y, corr = measure_shift_integer(map_ref, map_tgt)
 
     # Convert lag (shift target->ref) to target-minus-reference convention.
@@ -338,6 +525,7 @@ def process_job(
     residual_path = compare_dir / f"residual_{job.source}_{job.line}_M{job.mixer}_minus_M{job.target_mixer}.fits"
     fits.PrimaryHDU(residual_cube, header=ref_header).writeto(residual_path, overwrite=True)
 
+    # Score the residual cube after alignment so the same metric can drive weighting.
     mean_abs_pixel_residual, frame_mean_abs_pixel_residual, _frame_means = score_residual_fits(residual_path)
 
     return JobResult(
@@ -364,6 +552,15 @@ def process_job(
 
 
 def parse_line_target_config(config: dict[str, object], line: str) -> tuple[int, list[int]]:
+    """Read default target and mixer choices for a spectral line.
+
+    Args:
+        config: Parsed JSON configuration.
+        line: Spectral line name to resolve.
+
+    Returns:
+        A tuple of ``(target_mixer, mixers)`` for the requested line.
+    """
     defaults = {
         "CII": (8, [5]),
         "NII": (2, [3, 6]),
@@ -390,6 +587,19 @@ def parse_line_target_config(config: dict[str, object], line: str) -> tuple[int,
 
 
 def parse_jobs(config: dict[str, object], default_run: str, data_root: Path) -> list[Job]:
+    """Build the batch job list from configuration.
+
+    Args:
+        config: Parsed JSON configuration.
+        default_run: Run selector to use when a job does not specify one.
+        data_root: Root directory used to discover sources when none are listed.
+
+    Returns:
+        A list of jobs to process.
+
+    Raises:
+        ValueError: If the configuration requests invalid or empty jobs.
+    """
     raw_jobs = config.get("jobs")
     if isinstance(raw_jobs, list) and raw_jobs:
         jobs: list[Job] = []
@@ -469,6 +679,15 @@ def parse_jobs(config: dict[str, object], default_run: str, data_root: Path) -> 
 
 
 def write_csv(rows: list[dict[str, object]], out_path: Path) -> None:
+    """Write the batch results table to a CSV file.
+
+    Args:
+        rows: Sequence of row dictionaries to serialize.
+        out_path: Destination CSV path.
+
+    Returns:
+        ``None``. The CSV file is written to disk.
+    """
     if not rows:
         return
     fieldnames = [
@@ -500,6 +719,11 @@ def write_csv(rows: list[dict[str, object]], out_path: Path) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Create the command-line parser for the script.
+
+    Returns:
+        Configured :class:`argparse.ArgumentParser` instance.
+    """
     parser = argparse.ArgumentParser(
         description="Score residual FITS cubes by mean absolute pixel residual and select the best source per mixer"
     )
@@ -516,6 +740,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    """Run the command-line entry point for batch scoring and offset updates.
+
+    Returns:
+        ``None``. The function prints progress, writes outputs, and may exit
+        early when running in single-file scoring mode.
+    """
     parser = build_parser()
     args = parser.parse_args()
 
@@ -568,6 +798,7 @@ def main() -> None:
             )
             results.append(row)
         except Exception as exc:
+            # Preserve a row for failed jobs so the CSV keeps the full batch history.
             results.append(
                 JobResult(
                     source=job.source,
@@ -601,6 +832,7 @@ def main() -> None:
         by_mixer.setdefault(pix_label, []).append(row)
 
     for pix_label, rows_for_mixer in by_mixer.items():
+        # Convert residual scores into weights so better-aligned sources dominate.
         weights: list[float] = []
         valid_rows: list[JobResult] = []
         for row in rows_for_mixer:
