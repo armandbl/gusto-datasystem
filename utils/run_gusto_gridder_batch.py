@@ -55,6 +55,7 @@ def main() -> None:
 
     # GUSTOgridder concatenates dir_write + ofile, so use a leading slash to place
     # outputs under Data/level2/<source>/<n>th run/.
+    # TODO Change into path for subcube. 
     first_output = run_dir / f"{args.source}_CII_8_reference.fits"
     first_ofile = f"/{run_dir.name}/{first_output.name}"
 
