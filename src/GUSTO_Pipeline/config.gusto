@@ -1,5 +1,5 @@
-path = /media/armand/SSD_ARMAND/gusto-datasystem/Data
-band = [1, 2]
+path = /run/media/apbblanchot/SSD_ARMAND/gusto-datasystem/Data
+band = [1]
 cpus = 16
 scanid = [4000, 8000]
 level = 1.0

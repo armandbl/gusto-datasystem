@@ -563,7 +563,7 @@ def parse_line_target_config(config: dict[str, object], line: str) -> tuple[int,
     """
     defaults = {
         "CII": (8, [5]),
-        "NII": (2, [3, 6]),
+        "NII": (3, [2, 6]),
     }
     default_target, default_mixers = defaults[line]
 

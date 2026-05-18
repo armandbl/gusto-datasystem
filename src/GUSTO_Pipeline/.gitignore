@@ -41,5 +41,27 @@ Thumbs.db
 __pycache__
 GUSTO_Pipeline.egg-info
 
-# Data Folder
+# Data folder - large research files
 Data/
+Perso/
+GUSTO_Pipeline.egg-info/
+
+# Python & build artifacts
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.eggs/
+.Venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

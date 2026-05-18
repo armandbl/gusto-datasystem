@@ -479,16 +479,15 @@ def main(args=None,verbose=True):
 
     vv_in = np.arange(vmin,vmax,vel_spacing)
     ktypes = ['B', 'G', 'N']
-    match kern:
-        case 'gaussbessel':
-            KT = ktypes[0]
-        case 'gauss': 
-            KT = ktypes[1]
-        case 'nearest':
-            KT = ktypes[2]
-        case _:
-            print('Not a valid kernel: use gaussbessel (default), gauss or nearest')
-            return
+    if kern == 'gaussbessel':
+        KT = ktypes[0]
+    elif kern == 'gauss':
+        KT = ktypes[1]
+    elif kern == 'nearest':
+        KT = ktypes[2]
+    else:
+        print('Not a valid kernel: use gaussbessel (default), gauss or nearest')
+        return
 
     if source[0] == 'G':
         xcoord='GLON'

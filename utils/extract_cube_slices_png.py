@@ -1,6 +1,7 @@
 import argparse
 import re
 from pathlib import Path
+from typing import List, Optional, Tuple
 
 import numpy as np
 from astropy.io import fits
@@ -60,13 +61,13 @@ def spectral_axis_kms(header: fits.Header, nchan: int) -> np.ndarray:
     return axis
 
 
-def line_from_filename(file_path: Path) -> str | None:
+def line_from_filename(file_path: Path) -> Optional[str]:
     match = LINE_PATTERN.search(file_path.name)
     if not match:
         return None
     return match.group(1).upper()
 
-def mixer_from_filename(file_path: Path) -> str | None:
+def mixer_from_filename(file_path: Path) -> Optional[str]:
     match = MIXER_PATTERN.search(file_path.name)
     if not match:
         return None
@@ -76,7 +77,7 @@ def velocity_label(value: float) -> str:
     return f"{value:+06.1f}".replace("+", "p").replace("-", "m")
 
 
-def spatial_plot_metadata(header: fits.Header, frame: np.ndarray) -> tuple[list[float], str, str]:
+def spatial_plot_metadata(header: fits.Header, frame: np.ndarray) -> Tuple[List[float], str, str]:
     ny, nx = frame.shape
     crval1 = float(header.get("CRVAL1", 0.0))
     crpix1 = float(header.get("CRPIX1", 1.0))
@@ -101,7 +102,7 @@ def spatial_plot_metadata(header: fits.Header, frame: np.ndarray) -> tuple[list[
     return extent, xlabel, ylabel
 
 
-def extract_slice_frame(cube_path: Path, target_vel: float) -> tuple[str, str, float, np.ndarray, float, float, fits.Header]:
+def extract_slice_frame(cube_path: Path, target_vel: float) -> Tuple[str, str, float, np.ndarray, float, float, fits.Header]:
     with fits.open(cube_path) as hdul:
         data = hdul[0].data
         header = hdul[0].header
@@ -131,7 +132,7 @@ def extract_slice_frame(cube_path: Path, target_vel: float) -> tuple[str, str, f
     return line, mixer, actual_vel, frame, *line_intensity_limits(line), header
 
 
-def save_velocity_slice_png(cube_path: Path, velocities: list[float]) -> list[Path]:
+def save_velocity_slice_png(cube_path: Path, velocities: List[float]) -> List[Path]:
     line = line_from_filename(cube_path)
     if line is None:
         raise ValueError(f"Could not determine line (CII/NII) from filename {cube_path.name}")
@@ -166,8 +167,8 @@ def save_velocity_slice_png(cube_path: Path, velocities: list[float]) -> list[Pa
     return created
 
 
-def save_velocity_compare_png(cubes: list[Path], target_vel: float, run_dir: Path) -> list[Path]:
-    entries: list[tuple[str, str, float, np.ndarray, float, float, fits.Header]] = []
+def save_velocity_compare_png(cubes: List[Path], target_vel: float, run_dir: Path) -> List[Path]:
+    entries: List[Tuple[str, str, float, np.ndarray, float, float, fits.Header]] = []
 
     for cube_path in cubes:
         try:

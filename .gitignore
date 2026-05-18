@@ -1,6 +1,7 @@
 # Data folder - large research files
 Data/
 Perso/
+GUSTO_Pipeline.egg-info/
 
 # Python & build artifacts
 __pycache__/

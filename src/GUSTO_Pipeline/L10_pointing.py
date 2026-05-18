@@ -21,7 +21,7 @@ from .DataIO import *
 from .Logger import *
 from .flagdefs import *
 
-offsetfile0 = files('GUSTO_Pipeline') / 'calib/offsets.txt'
+offsetfile0 = files('GUSTO_Pipeline') / 'calib/NII_offsets.txt'
 logger = logging.getLogger('pipelineLogger')
 
 def L10_Pipeline(args, scanRange, verbose=False):
@@ -55,8 +55,8 @@ def L10_Pipeline(args, scanRange, verbose=False):
         
     logger.info('Number of cores used for processing: %i\n'%(n_procs))
     
-    inDir = args.path + 'level0.9/'
-    outDir = args.path + 'level1/'
+    inDir = args.path + 'level0.9/G337/'
+    outDir = args.path + 'level1/G337/'
     os.makedirs(outDir, exist_ok=True)
     if args.erase:
         clear_folder(outDir)
