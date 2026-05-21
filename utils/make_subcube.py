@@ -108,7 +108,16 @@ def _axis_matches_lat(phys_type: str) -> bool:
 
 def _axis_matches_spectral(phys_type: str) -> bool:
     phys_type = phys_type.lower()
-    return any(token in phys_type for token in ("spectral", "frequency", "velocity"))
+    return any(
+        token in phys_type
+        for token in (
+            "spectral",
+            "spect.",
+            "frequency",
+            "velocity",
+            "dopplerveloc",
+        )
+    )
 
 
 def _world_values_for_wcs(
