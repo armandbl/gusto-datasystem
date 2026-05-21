@@ -38,7 +38,15 @@ def find_run_dir(base_dir: Path, run: str) -> Path:
     return run_dir
 
 
-def spectral_axis_kms(header: fits.Header, nchan: int) -> np.ndarray:
+def spectral_axis_mps(header: fits.Header, nchan: int) -> np.ndarray:
+    """Return spectral axis in meters per second (m/s).
+
+    Assumes CRVAL3/CDELT3 are in the units specified by CUNIT3.
+
+    The GUSTO cubes in this repo frequently use values between about -200 and 200,
+    which is consistent with m/s (not km/s). This function forces m/s.
+    """
+
     crval = float(header.get("CRVAL3", 0.0))
     cdelt = float(header.get("CDELT3", 1.0))
     crpix = float(header.get("CRPIX3", 1.0))
@@ -47,17 +55,9 @@ def spectral_axis_kms(header: fits.Header, nchan: int) -> np.ndarray:
     axis = crval + ((np.arange(nchan) + 1.0) - crpix) * cdelt
 
     if "km/s" in cunit or "kms" in cunit:
-        return axis
+        return axis * 1000.0
 
-    # Some cubes are labeled m/s even when values are already in km/s.
-    if "m/s" in cunit or "ms-1" in cunit:
-        if np.nanmax(np.abs(axis)) > 2000.0:
-            return axis / 1000.0
-        return axis
-
-    # Unknown unit: infer from magnitude.
-    if np.nanmax(np.abs(axis)) > 2000.0:
-        return axis / 1000.0
+    # Treat m/s (and unknown) as m/s.
     return axis
 
 
@@ -67,13 +67,16 @@ def line_from_filename(file_path: Path) -> Optional[str]:
         return None
     return match.group(1).upper()
 
+
 def mixer_from_filename(file_path: Path) -> Optional[str]:
     match = MIXER_PATTERN.search(file_path.name)
     if not match:
         return None
     return match.group(1)
 
+
 def velocity_label(value: float) -> str:
+    # value is m/s
     return f"{value:+06.1f}".replace("+", "p").replace("-", "m")
 
 
@@ -102,7 +105,9 @@ def spatial_plot_metadata(header: fits.Header, frame: np.ndarray) -> Tuple[List[
     return extent, xlabel, ylabel
 
 
-def extract_slice_frame(cube_path: Path, target_vel: float) -> Tuple[str, str, float, np.ndarray, float, float, fits.Header]:
+def extract_slice_frame(
+    cube_path: Path, target_vel_mps: float
+) -> Tuple[str, str, float, np.ndarray, float, float, fits.Header]:
     with fits.open(cube_path) as hdul:
         data = hdul[0].data
         header = hdul[0].header
@@ -118,21 +123,21 @@ def extract_slice_frame(cube_path: Path, target_vel: float) -> Tuple[str, str, f
         raise ValueError(f"Unsupported cube shape {data.shape} in {cube_path}")
 
     nchan = data.shape[0]
-    vel_axis = spectral_axis_kms(header, nchan)
+    vel_axis = spectral_axis_mps(header, nchan)
 
     line = line_from_filename(cube_path)
     if line is None:
         raise ValueError(f"Could not determine line (CII/NII) from filename {cube_path.name}")
 
     mixer = mixer_from_filename(cube_path) or "unknown"
-    idx = int(np.argmin(np.abs(vel_axis - target_vel)))
+    idx = int(np.argmin(np.abs(vel_axis - target_vel_mps)))
     actual_vel = float(vel_axis[idx])
     frame = np.array(data[idx, :, :], dtype=float)
 
     return line, mixer, actual_vel, frame, *line_intensity_limits(line), header
 
 
-def save_velocity_slice_png(cube_path: Path, velocities: List[float]) -> List[Path]:
+def save_velocity_slice_png(cube_path: Path, velocities_mps: List[float]) -> List[Path]:
     line = line_from_filename(cube_path)
     if line is None:
         raise ValueError(f"Could not determine line (CII/NII) from filename {cube_path.name}")
@@ -140,7 +145,7 @@ def save_velocity_slice_png(cube_path: Path, velocities: List[float]) -> List[Pa
     vmin, vmax = line_intensity_limits(line)
     created = []
 
-    for target_vel in velocities:
+    for target_vel in velocities_mps:
         _, _, actual_vel, frame, _, _, header = extract_slice_frame(cube_path, target_vel)
         extent, xlabel, ylabel = spatial_plot_metadata(header, frame)
 
@@ -149,14 +154,16 @@ def save_velocity_slice_png(cube_path: Path, velocities: List[float]) -> List[Pa
         cb = fig.colorbar(image, ax=ax, shrink=0.9)
         cb.set_label("Intensity")
         ax.set_title(
-            f"{cube_path.name} | target v={target_vel:.1f} km/s | channel v={actual_vel:.2f} km/s"
+            f"{cube_path.name} | target v={target_vel:.1f} m/s | channel v={actual_vel:.2f} m/s"
         )
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
 
         safe_vel = velocity_label(target_vel)
-        out_name = f"{line_from_filename(cube_path)}_{mixer_from_filename(cube_path)}_slice_v{safe_vel}kms.png"
-        slice_dir = cube_path.parent / f"slice_{safe_vel}kms"
+        out_name = (
+            f"{line_from_filename(cube_path)}_{mixer_from_filename(cube_path)}_slice_v{safe_vel}mps.png"
+        )
+        slice_dir = cube_path.parent / f"slice_{safe_vel}mps"
         slice_dir.mkdir(parents=True, exist_ok=True)
         out_path = slice_dir / out_name
         fig.tight_layout()
@@ -167,12 +174,12 @@ def save_velocity_slice_png(cube_path: Path, velocities: List[float]) -> List[Pa
     return created
 
 
-def save_velocity_compare_png(cubes: List[Path], target_vel: float, run_dir: Path) -> List[Path]:
+def save_velocity_compare_png(cubes: List[Path], target_vel_mps: float, run_dir: Path) -> List[Path]:
     entries: List[Tuple[str, str, float, np.ndarray, float, float, fits.Header]] = []
 
     for cube_path in cubes:
         try:
-            line, mixer, actual_vel, frame, vmin, vmax, header = extract_slice_frame(cube_path, target_vel)
+            line, mixer, actual_vel, frame, vmin, vmax, header = extract_slice_frame(cube_path, target_vel_mps)
         except Exception:
             continue
         entries.append((line, mixer, actual_vel, frame, vmin, vmax, header))
@@ -182,8 +189,8 @@ def save_velocity_compare_png(cubes: List[Path], target_vel: float, run_dir: Pat
 
     entries.sort(key=lambda item: (0 if item[0] == "CII" else 1, MIXER_ORDER.get(item[1], 999), item[1]))
 
-    safe_vel = velocity_label(target_vel)
-    slice_dir = run_dir / f"slice_{safe_vel}kms"
+    safe_vel = velocity_label(target_vel_mps)
+    slice_dir = run_dir / f"slice_{safe_vel}mps"
     slice_dir.mkdir(parents=True, exist_ok=True)
 
     ncols = 4
@@ -225,9 +232,9 @@ def save_velocity_compare_png(cubes: List[Path], target_vel: float, run_dir: Pat
     if nii_image is not None:
         cax_nii = fig.add_axes([0.915, 0.12, 0.015, 0.32])
         fig.colorbar(nii_image, cax=cax_nii, label="NII Intensity")
-        
-    fig.suptitle(f"Velocity slice comparison at target v={target_vel:.1f} km/s", fontsize=16)
-    out_path = run_dir / "Compare" / f"Compare_slice_v{safe_vel}kms.png"
+
+    fig.suptitle(f"Velocity slice comparison at target v={target_vel_mps:.1f} m/s", fontsize=16)
+    out_path = run_dir / "Compare" / f"Compare_slice_v{safe_vel}mps.png"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
@@ -238,14 +245,11 @@ def save_velocity_compare_png(cubes: List[Path], target_vel: float, run_dir: Pat
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Extract velocity slices from GUSTOgridder cubes and save PNG previews in the run directory."
+            "Extract velocity slices from GUSTOgridder cubes and save PNG previews in the run directory. "
+            "Velocities are in m/s."
         )
     )
-    parser.add_argument(
-        "--source", 
-        default="G337",
-        help="Source under Data/level2"
-    )
+    parser.add_argument("--source", default="G337", help="Source under Data/level2")
     parser.add_argument(
         "--run",
         default="latest",
@@ -261,7 +265,7 @@ def main() -> None:
         nargs="+",
         type=float,
         required=True,
-        help="Velocity values in km/s to extract, e.g. --velocities -120 -90 -60",
+        help="Velocity values in m/s to extract, e.g. --velocities -160 -120 -80",
     )
     parser.add_argument(
         "--pattern",
@@ -287,7 +291,7 @@ def main() -> None:
         raise FileNotFoundError(f"No FITS files found in {run_dir} matching {args.pattern}")
 
     print(f"Using run directory: {run_dir}")
-    print(f"Velocities (km/s): {args.velocities}")
+    print(f"Velocities (m/s): {args.velocities}")
 
     total_png = 0
     compare_png = 0
@@ -304,9 +308,9 @@ def main() -> None:
         try:
             outputs = save_velocity_compare_png(cubes, target_vel, run_dir)
             compare_png += len(outputs)
-            print(f"velocity {target_vel:.1f} km/s: wrote {len(outputs)} comparison PNGs")
+            print(f"velocity {target_vel:.1f} m/s: wrote {len(outputs)} comparison PNGs")
         except Exception as exc:
-            print(f"Skipping comparison for {target_vel:.1f} km/s: {exc}")
+            print(f"Skipping comparison for {target_vel:.1f} m/s: {exc}")
 
     print(f"Done. Wrote {total_png} slice PNGs and {compare_png} comparison PNGs in {run_dir}")
 

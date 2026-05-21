@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""
-Create a spatial/spectral subcube around a Galactic coordinate and velocity range.
+"""Create a spatial/spectral subcube around a Galactic coordinate and velocity range.
 
 Example:
   python utils/make_subcube.py \
     --input data/original_cube.fits \
     --output data/subcube.fits \
-    --vmin -10 --vmax 25 \
+    --vmin -160 --vmax 0 \
     --l 49.5 --b -0.2 \
     --radius-arcmin 5
+
+Notes:
+- vmin/vmax are interpreted as **m/s**.
+- (l, b) are Galactic lon/lat in degrees.
 """
 
 from __future__ import annotations
@@ -27,83 +30,39 @@ import astropy.units as u
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Extract a subcube from a FITS data cube using Galactic coordinates and a velocity range."
+            "Extract a subcube from a FITS data cube using Galactic coordinates and a velocity range. "
+            "vmin/vmax are in m/s."
         )
     )
 
-    parser.add_argument(
-        "--input",
-        required=True,
-        help="Path to the input FITS data cube.",
-    )
-    parser.add_argument(
-        "--output",
-        required=True,
-        help="Path to write the output subcube FITS file.",
-    )
-    parser.add_argument(
-        "--vmin",
-        required=True,
-        type=float,
-        help="Minimum velocity (km/s).",
-    )
-    parser.add_argument(
-        "--vmax",
-        required=True,
-        type=float,
-        help="Maximum velocity (km/s).",
-    )
-    parser.add_argument(
-        "--l",
-        required=True,
-        type=float,
-        help="Galactic longitude (deg).",
-    )
-    parser.add_argument(
-        "--b",
-        required=True,
-        type=float,
-        help="Galactic latitude (deg).",
-    )
+    parser.add_argument("--input", required=True, help="Path to the input FITS data cube.")
+    parser.add_argument("--output", required=True, help="Path to write the output subcube FITS file.")
+
+    parser.add_argument("--vmin", required=True, type=float, help="Minimum velocity (m/s).")
+    parser.add_argument("--vmax", required=True, type=float, help="Maximum velocity (m/s).")
+
+    parser.add_argument("--l", required=True, type=float, help="Galactic longitude (deg).")
+    parser.add_argument("--b", required=True, type=float, help="Galactic latitude (deg).")
 
     size_group = parser.add_mutually_exclusive_group(required=True)
+    size_group.add_argument("--radius-pix", type=int, help="Half-size of the spatial cutout in pixels.")
     size_group.add_argument(
-        "--radius-pix",
-        type=int,
-        help="Half-size of the spatial cutout in pixels.",
-    )
-    size_group.add_argument(
-        "--radius-arcmin",
-        type=float,
-        help="Half-size of the spatial cutout in arcminutes.",
+        "--radius-arcmin", type=float, help="Half-size of the spatial cutout in arcminutes."
     )
 
-    parser.add_argument(
-        "--ext",
-        type=int,
-        default=0,
-        help="FITS extension index (default: 0).",
-    )
+    parser.add_argument("--ext", type=int, default=0, help="FITS extension index (default: 0).")
 
     return parser.parse_args()
 
 
 def _axis_matches_lon(phys_type: str) -> bool:
     phys_type = phys_type.lower()
-    return (
-        "longitude" in phys_type
-        or phys_type.endswith(".lon")
-        or phys_type.endswith(":lon")
-    )
+    return "longitude" in phys_type or phys_type.endswith(".lon") or phys_type.endswith(":lon")
 
 
 def _axis_matches_lat(phys_type: str) -> bool:
     phys_type = phys_type.lower()
-    return (
-        "latitude" in phys_type
-        or phys_type.endswith(".lat")
-        or phys_type.endswith(":lat")
-    )
+    return "latitude" in phys_type or phys_type.endswith(".lat") or phys_type.endswith(":lat")
 
 
 def _axis_matches_spectral(phys_type: str) -> bool:
@@ -120,12 +79,12 @@ def _axis_matches_spectral(phys_type: str) -> bool:
     )
 
 
-def _world_values_for_wcs(
-    wcs: WCS, gal_l_deg: float, gal_b_deg: float, vel: u.Quantity
-) -> Tuple[float, ...]:
-    """Return world values in the order expected by WCS.world_to_array_index_values()."""
+def _world_values_for_wcs(wcs: WCS, gal_l_deg: float, gal_b_deg: float, vel_mps: float) -> Tuple[float, ...]:
+    """Return world values in the order expected by WCS.world_to_array_index_values().
 
-    # WCS expects world values in the order of world_axis_physical_types
+    vel_mps is interpreted as meters per second.
+    """
+
     values = []
     sky = SkyCoord(l=gal_l_deg * u.deg, b=gal_b_deg * u.deg, frame="galactic")
 
@@ -140,7 +99,8 @@ def _world_values_for_wcs(
         elif _axis_matches_lat(phys_type):
             val = sky.b.to(unit).value if unit else sky.b.deg
         elif _axis_matches_spectral(phys_type):
-            val = vel.to(unit).value if unit else vel.value
+            vel_q = u.Quantity(vel_mps, u.m / u.s)
+            val = vel_q.to(unit).value if unit else vel_q.value
         else:
             raise ValueError(
                 f"Unsupported world axis type '{phys_type}'. Expected lon/lat/spectral axes."
@@ -154,9 +114,7 @@ def _world_values_for_wcs(
 def _radius_pixels(wcs: WCS, radius_arcmin: float) -> int:
     """Estimate a pixel radius from an arcminute radius using celestial WCS."""
     cel = wcs.celestial
-    # proj_plane_pixel_scales gives degrees/pixel for each axis
     scales_deg = proj_plane_pixel_scales(cel) * u.deg
-    # Use the mean scale for a square-ish pixel estimate
     mean_scale = np.mean(scales_deg).to(u.arcmin)
     radius_pix = int(np.ceil((radius_arcmin * u.arcmin / mean_scale).value))
     return max(radius_pix, 1)
@@ -192,11 +150,8 @@ def main() -> None:
     if wcs.naxis < 3:
         raise ValueError("Expected a 3D FITS cube (spectral + 2 spatial axes).")
 
-    vmin = args.vmin * u.km / u.s
-    vmax = args.vmax * u.km / u.s
-
-    world_min = _world_values_for_wcs(wcs, args.l, args.b, vmin)
-    world_max = _world_values_for_wcs(wcs, args.l, args.b, vmax)
+    world_min = _world_values_for_wcs(wcs, args.l, args.b, args.vmin)
+    world_max = _world_values_for_wcs(wcs, args.l, args.b, args.vmax)
 
     idx_min = wcs.world_to_array_index_values(*world_min)
     idx_max = wcs.world_to_array_index_values(*world_max)
@@ -216,7 +171,6 @@ def main() -> None:
     else:
         radius_pix = _radius_pixels(wcs, args.radius_arcmin)
 
-    # Build slices in numpy (array) order
     slices = [slice(None)] * data.ndim
 
     # Spectral slice
@@ -241,7 +195,6 @@ def main() -> None:
         sub_wcs = wcs.slice(tuple(slices))
         sub_header = sub_wcs.to_header()
     except Exception:
-        # Fallback: adjust CRPIX for each axis
         sub_header = header.copy()
         for i, slc in enumerate(slices, start=1):
             if isinstance(slc, slice):
