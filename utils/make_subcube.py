@@ -168,6 +168,15 @@ def _clamp_slice(start: int, end: int, size: int) -> slice:
     return slice(start, end)
 
 
+def _assert_non_empty_slice(slc: slice, axis: int, size: int) -> None:
+    if slc.start is None or slc.stop is None or slc.start >= slc.stop:
+        raise ValueError(
+            "Requested subcube is outside the input cube bounds. "
+            f"Axis {axis} slice {slc.start}:{slc.stop} (size {size}). "
+            "Try coordinates within the cube footprint or adjust vmin/vmax/radius."
+        )
+
+
 def main() -> None:
     args = _parse_args()
 
@@ -221,6 +230,9 @@ def main() -> None:
         start = center - radius_pix
         end = center + radius_pix + 1
         slices[axis] = _clamp_slice(start, end, data.shape[axis])
+
+    for axis, slc in enumerate(slices):
+        _assert_non_empty_slice(slc, axis, data.shape[axis])
 
     subcube = data[tuple(slices)]
 
