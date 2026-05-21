@@ -14,7 +14,7 @@ Example:
 from __future__ import annotations
 
 import argparse
-from typing import Iterable, Tuple
+from typing import Tuple
 
 import numpy as np
 from astropy.io import fits
@@ -88,6 +88,29 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _axis_matches_lon(phys_type: str) -> bool:
+    phys_type = phys_type.lower()
+    return (
+        "longitude" in phys_type
+        or phys_type.endswith(".lon")
+        or phys_type.endswith(":lon")
+    )
+
+
+def _axis_matches_lat(phys_type: str) -> bool:
+    phys_type = phys_type.lower()
+    return (
+        "latitude" in phys_type
+        or phys_type.endswith(".lat")
+        or phys_type.endswith(":lat")
+    )
+
+
+def _axis_matches_spectral(phys_type: str) -> bool:
+    phys_type = phys_type.lower()
+    return any(token in phys_type for token in ("spectral", "frequency", "velocity"))
+
+
 def _world_values_for_wcs(
     wcs: WCS, gal_l_deg: float, gal_b_deg: float, vel: u.Quantity
 ) -> Tuple[float, ...]:
@@ -103,11 +126,11 @@ def _world_values_for_wcs(
 
         unit = u.Unit(unit_str) if unit_str else None
 
-        if "longitude" in phys_type:
+        if _axis_matches_lon(phys_type):
             val = sky.l.to(unit).value if unit else sky.l.deg
-        elif "latitude" in phys_type:
+        elif _axis_matches_lat(phys_type):
             val = sky.b.to(unit).value if unit else sky.b.deg
-        elif "spectral" in phys_type or "frequency" in phys_type or "velocity" in phys_type:
+        elif _axis_matches_spectral(phys_type):
             val = vel.to(unit).value if unit else vel.value
         else:
             raise ValueError(
