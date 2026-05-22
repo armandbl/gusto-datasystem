@@ -21,7 +21,7 @@ from .DataIO import *
 from .Logger import *
 from .flagdefs import *
 
-offsetfile0 = files('GUSTO_Pipeline') / 'calib/NII_offsets.txt'
+offsetfile0 = files('GUSTO_Pipeline') / 'calib/offsets.txt'
 logger = logging.getLogger('pipelineLogger')
 
 def L10_Pipeline(args, scanRange, verbose=False):
