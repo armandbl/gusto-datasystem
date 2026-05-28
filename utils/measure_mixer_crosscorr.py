@@ -14,6 +14,8 @@ from scipy.signal import fftconvolve
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from make_difference_cube import write_difference_cube
+
 
 RUN_PATTERN = re.compile(r"^run\s+(\d+)$", re.IGNORECASE)
 
@@ -287,54 +289,6 @@ def measure_shift_integer(reference_map: np.ndarray, target_map: np.ndarray) -> 
     return lag_x, lag_y, corr
 
 
-def shift2d_no_wrap(image: np.ndarray, shift_x: int, shift_y: int, fill_value: float = np.nan) -> np.ndarray:
-    """Shift a 2D image without wraparound.
-
-    Args:
-        image: 2D array to shift.
-        shift_x: Pixel shift along the x axis.
-        shift_y: Pixel shift along the y axis.
-        fill_value: Value used to fill regions that move out of bounds.
-
-    Returns:
-        The shifted 2D array with out-of-overlap pixels filled.
-    """
-    ny, nx = image.shape
-    out = np.full((ny, nx), fill_value, dtype=float)
-
-    src_x0 = max(0, -shift_x)
-    src_x1 = min(nx, nx - shift_x)
-    src_y0 = max(0, -shift_y)
-    src_y1 = min(ny, ny - shift_y)
-
-    dst_x0 = max(0, shift_x)
-    dst_x1 = dst_x0 + (src_x1 - src_x0)
-    dst_y0 = max(0, shift_y)
-    dst_y1 = dst_y0 + (src_y1 - src_y0)
-
-    if src_x1 > src_x0 and src_y1 > src_y0:
-        out[dst_y0:dst_y1, dst_x0:dst_x1] = image[src_y0:src_y1, src_x0:src_x1]
-
-    return out
-
-
-def shift3d_no_wrap(cube: np.ndarray, shift_x: int, shift_y: int) -> np.ndarray:
-    """Shift every channel in a cube by the same integer offset.
-
-    Args:
-        cube: 3D array with channel, y, x axes.
-        shift_x: Pixel shift along the x axis.
-        shift_y: Pixel shift along the y axis.
-
-    Returns:
-        A shifted cube with the same shape as the input.
-    """
-    shifted = np.empty_like(cube, dtype=float)
-    for chan in range(cube.shape[0]):
-        shifted[chan] = shift2d_no_wrap(cube[chan], shift_x, shift_y)
-    return shifted
-
-
 def update_offsets_file(offsets_file: Path, pix_label: str, az_deg: float, el_deg: float) -> None:
     """Insert or replace an AS_MEASURED offset entry in the calibration table.
 
@@ -520,10 +474,15 @@ def process_job(
         title=f"{job.source} {job.line} M{job.target_mixer} vs M{job.mixer} | lag=({lag_x},{lag_y})",
     )
 
-    shifted_target_cube = shift3d_no_wrap(tgt_cube, lag_x, lag_y)
-    residual_cube = shifted_target_cube - ref_cube
     residual_path = compare_dir / f"residual_{job.source}_{job.line}_M{job.mixer}_minus_M{job.target_mixer}.fits"
-    fits.PrimaryHDU(residual_cube, header=ref_header).writeto(residual_path, overwrite=True)
+    write_difference_cube(
+        reference_cube=ref_cube,
+        target_cube=tgt_cube,
+        shift_x=lag_x,
+        shift_y=lag_y,
+        output_path=residual_path,
+        header=ref_header,
+    )
 
     # Score the residual cube after alignment so the same metric can drive weighting.
     mean_abs_pixel_residual, frame_mean_abs_pixel_residual, _frame_means = score_residual_fits(residual_path)

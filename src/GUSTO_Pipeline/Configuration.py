@@ -24,7 +24,8 @@ def getConfiguration(verbose=False):
     parser.add('--calmethod', required=False, help='Calibration method to use', default='cal_scaledGainHOTs')
     parser.add('--despurmethod', required=False, help='despur method to use', default='polyRes')
     parser.add('--spurchannelfilter', required=False, action=argparse.BooleanOptionalAction, help='apply filter for spur masks', default=False)
-    
+    parser.add('--zero-reference', required=False, action=argparse.BooleanOptionalAction, help='Zero-reference offsets per band using the band anchor mixer', default=False)
+
     args = parser.parse_args()
     print(parser.format_values())
 

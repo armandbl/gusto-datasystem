@@ -12,6 +12,7 @@ build/
 .eggs/
 .Venv/
 venv/
+.venv-linux/
 
 # IDE
 .vscode/

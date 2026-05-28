@@ -68,7 +68,7 @@ def L10_Pipeline(args, scanRange, verbose=False):
         dfiles = makeFileGlob(inDir, prefix[int(band)-1], 'fits', scanRange)
         sum_files += len(dfiles)
                     
-        paramlist = [[a, b, c, d, e, f] for a in [band] for b in [inDir] for c in [outDir] for d in dfiles for e in [args.debug] for f in [commit_info]]
+        paramlist = [[a, b, c, d, e, f, g] for a in [band] for b in [inDir] for c in [outDir] for d in dfiles for e in [args.debug] for f in [commit_info] for g in [args]]
         if verbose:
             logger.debug(f'Number of data files: {len(dfiles)} {len(sdirs)}')
         
@@ -108,15 +108,15 @@ def processL09(params, verbose=True):
 
     """
 
-    line, inDir, outDir, dfile, debug, commit_info = params[0], params[1], params[2], params[3], params[4], params[5]
+    line, inDir, outDir, dfile, debug, commit_info, args = params[0], params[1], params[2], params[3], params[4], params[5], params[6]
     spec, data, hdr, hdr1 = loadSDFITS(os.path.join(inDir,dfile), verbose=False)
     
     umixers = np.unique(data['MIXER'])
     band = hdr['BAND']
     # insert the coordinate corrections
     # Note: the coordinate correction is not yet final
-    # and will be (iteratively) improved    
-    mxoffs = getMixerOffsets(band, umixers, verbose=verbose)
+    # and will be (iteratively) improved
+    mxoffs = getMixerOffsets(band, umixers, verbose=verbose, args=args)
     
     for i, mix in enumerate(umixers):
         azoff = mxoffs['az'][i]
@@ -226,31 +226,60 @@ def processL09(params, verbose=True):
     return dfile
 
 
-def getMixerOffsets(band, mixers, offsetfile=None, verbose=False):
+def getMixerOffsets(band, mixers, offsetfile=None, verbose=False, args=None):
     """Function retrieving the GUSTO on-sky mixer offsets from file.
 
     usage:
-    ------    
+    ------
     aa = getMixerOffsets(1, [3, 5, 8], verbose=True)
     print(aa['az'])     # prints: [0.06079  0.062584 0.093356]
-    """    
+    """
 
     if offsetfile is None:
         offsetfile = offsetfile0
 
     offsets = np.empty(0, dtype=int)
-    
-    data = np.genfromtxt(offsetfile, delimiter='\t', skip_header=2, 
+    mixers = list(mixers)
+
+    data = np.genfromtxt(offsetfile, delimiter='\t', skip_header=2,
                          dtype=[('mxpix', 'U4'), ('az', '<f8'), ('el', '<f8'), ('type', 'U16')])
-    
-    cmixers = ['B%iM%i'%(band, i) for i in mixers]    
+
+    cmixers = ['B%iM%i'%(band, i) for i in mixers]
     for cmixer in cmixers:
         offset = np.argwhere((cmixer == data['mxpix'])&((data['type']=='AS_MEASURED')|(data['type']=='FIDUCIAL'))).flatten()
         if offset.size == 0: # revert to the theory value
             offset = np.argwhere((cmixer == data['mxpix'])&(data['type']=='THEORY')).flatten()
             #print(f'Theory for {cmixer}')
         offsets = np.append(offsets, offset)
-        
 
-    #print(data[offsets].flatten())    
+    # Apply zero-referencing if requested
+    if args is not None and getattr(args, 'zero_reference', False):
+        if len(offsets) > 0:
+            # Get the offset data for all requested mixers
+            mixer_data = data[offsets]
+
+            # Zero-reference each band against a fixed mixer anchor so the
+            # reference is stable and independent for the two arrays.
+            reference_mixers = {1: 'B1M3', 2: 'B2M8'}
+            ref_label = reference_mixers.get(int(band))
+
+            if ref_label in mixer_data['mxpix']:
+                ref_idx = np.argwhere(mixer_data['mxpix'] == ref_label).flatten()[0]
+            else:
+                # Fall back to the first requested mixer if the configured
+                # reference is not present in this subset.
+                ref_idx = 0
+
+            ref_az = mixer_data['az'][ref_idx]
+            ref_el = mixer_data['el'][ref_idx]
+
+            zero_referenced = np.zeros(len(mixer_data), dtype=[('mxpix', 'U4'), ('az', '<f8'), ('el', '<f8'), ('type', 'U16')])
+            zero_referenced['mxpix'] = mixer_data['mxpix']
+            zero_referenced['az'] = mixer_data['az'] - ref_az
+            zero_referenced['el'] = mixer_data['el'] - ref_el
+            zero_referenced['type'] = mixer_data['type']
+
+            return zero_referenced
+
+    #print(data[offsets].flatten())
     return data[offsets].flatten()
