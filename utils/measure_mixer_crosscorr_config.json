@@ -3,7 +3,8 @@
   "offsets_file": "src/GUSTO_Pipeline/calib/offsets.txt",
   "run": "latest",
   "max_residual_deg": 0.5,
-  "csv_output": "Data/level2/crosscorr_offsets_results.csv",
+  "measurements_output": "Data/level2/crosscorr_measurements.csv",
+  "delta_output": "Data/level2/crosscorr_deltas.csv",
   "line_targets": {
     "CII": {
       "target_mixer": 8,
