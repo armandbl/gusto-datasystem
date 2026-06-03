@@ -8,7 +8,7 @@ from pathlib import Path
 
 from astropy.io import fits
 
-from measure_mixer_crosscorr_moment0 import build_moment0_map, load_cube, moment0_header
+from measure_mixer_crosscorr import build_moment0_map, load_cube, moment0_header
 
 
 def build_parser() -> argparse.ArgumentParser:

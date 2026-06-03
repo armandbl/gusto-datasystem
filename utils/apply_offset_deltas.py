@@ -60,7 +60,7 @@ def apply_deltas_to_offsets(offsets_file: Path, deltas: dict[str, tuple[float, f
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Apply summed delta offsets to a calibration file")
     parser.add_argument("--offsets", required=True, help="Base offsets text file")
-    parser.add_argument("--deltas", required=True, help="Delta CSV file from measure_mixer_crosscorr.py")
+    parser.add_argument("--deltas", required=True, help="Delta CSV file from measure_mixer_crosscorr")
     parser.add_argument("--output", required=True, help="Output offsets file")
     return parser
 
