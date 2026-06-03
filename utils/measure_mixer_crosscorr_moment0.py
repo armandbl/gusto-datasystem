@@ -390,16 +390,18 @@ def write_delta_csv(rows: list[JobResult], out_path: Path) -> None:
 
     delta_rows: list[dict[str, object]] = []
     for pix_label, items in sorted(grouped.items()):
+        mean_az_deg = float(np.mean([item.az_deg for item in items]))
+        mean_el_deg = float(np.mean([item.el_deg for item in items]))
         delta_rows.append(
             {
                 "pix_label": pix_label,
                 "line": items[0].line,
                 "target_mixer": items[0].target_mixer,
                 "source_count": len(items),
-                "sum_dx_pix": float(np.sum([item.dx_pix for item in items])),
-                "sum_dy_pix": float(np.sum([item.dy_pix for item in items])),
-                "sum_az_deg": float(np.sum([item.az_deg for item in items])),
-                "sum_el_deg": float(np.sum([item.el_deg for item in items])),
+                "mean_dx_pix": float(np.mean([item.dx_pix for item in items])),
+                "mean_dy_pix": float(np.mean([item.dy_pix for item in items])),
+                "mean_az_deg": mean_az_deg,
+                "mean_el_deg": mean_el_deg,
                 "contributors": ",".join(item.source for item in items),
             }
         )
@@ -412,10 +414,10 @@ def write_delta_csv(rows: list[JobResult], out_path: Path) -> None:
             "line",
             "target_mixer",
             "source_count",
-            "sum_dx_pix",
-            "sum_dy_pix",
-            "sum_az_deg",
-            "sum_el_deg",
+            "mean_dx_pix",
+            "mean_dy_pix",
+            "mean_az_deg",
+            "mean_el_deg",
             "contributors",
         ],
     )

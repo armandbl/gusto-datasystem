@@ -236,9 +236,12 @@ def getMixerOffsets(band, mixers, offsetfile=None, verbose=False, args=None):
     """
 
     if offsetfile is None:
-        offsetfile = offsetfile0
+        if args is not None and getattr(args, 'offsets_file', None):
+            offsetfile = args.offsets_file
+        else:
+            offsetfile = offsetfile0
 
-    offsets = np.empty(0, dtype=int)
+    offsets = []
     mixers = list(mixers)
 
     data = np.genfromtxt(offsetfile, delimiter='\t', skip_header=2,
@@ -246,11 +249,21 @@ def getMixerOffsets(band, mixers, offsetfile=None, verbose=False, args=None):
 
     cmixers = ['B%iM%i'%(band, i) for i in mixers]
     for cmixer in cmixers:
-        offset = np.argwhere((cmixer == data['mxpix'])&((data['type']=='AS_MEASURED')|(data['type']=='FIDUCIAL'))).flatten()
-        if offset.size == 0: # revert to the theory value
-            offset = np.argwhere((cmixer == data['mxpix'])&(data['type']=='THEORY')).flatten()
-            #print(f'Theory for {cmixer}')
-        offsets = np.append(offsets, offset)
+        cmixer_mask = cmixer == data['mxpix']
+        if not np.any(cmixer_mask):
+            raise ValueError(f'No mixer offsets found for {cmixer} in {offsetfile}')
+
+        selected_offset = None
+        for offset_type in ('DELTA_APPLIED', 'AS_MEASURED', 'FIDUCIAL', 'THEORY'):
+            offset_matches = np.argwhere(cmixer_mask & (data['type'] == offset_type)).flatten()
+            if offset_matches.size > 0:
+                selected_offset = int(offset_matches[-1])
+                break
+
+        if selected_offset is None:
+            selected_offset = int(np.argwhere(cmixer_mask).flatten()[-1])
+
+        offsets.append(selected_offset)
 
     # Apply zero-referencing if requested
     if args is not None and getattr(args, 'zero_reference', False):

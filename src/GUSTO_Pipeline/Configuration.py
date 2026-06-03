@@ -25,6 +25,7 @@ def getConfiguration(verbose=False):
     parser.add('--despurmethod', required=False, help='despur method to use', default='polyRes')
     parser.add('--spurchannelfilter', required=False, action=argparse.BooleanOptionalAction, help='apply filter for spur masks', default=False)
     parser.add('--zero-reference', required=False, action=argparse.BooleanOptionalAction, help='Zero-reference offsets per band using the band anchor mixer', default=False)
+    parser.add('--offsets-file', required=False, help='Calibration offsets table to use for mixer pointing corrections', default=str(files('GUSTO_Pipeline') / 'calib/offsets.txt'))
 
     args = parser.parse_args()
     print(parser.format_values())

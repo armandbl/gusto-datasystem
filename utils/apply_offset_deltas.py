@@ -16,9 +16,13 @@ def read_deltas(path: Path) -> dict[str, tuple[float, float]]:
             pix_label = str(row.get("pix_label", "")).strip()
             if not pix_label:
                 continue
-            sum_az = float(row.get("sum_az_deg", 0.0) or 0.0)
-            sum_el = float(row.get("sum_el_deg", 0.0) or 0.0)
-            deltas[pix_label] = (sum_az, sum_el)
+            az_value = row.get("mean_az_deg")
+            el_value = row.get("mean_el_deg")
+            if az_value in (None, ""):
+                az_value = row.get("sum_az_deg", 0.0)
+            if el_value in (None, ""):
+                el_value = row.get("sum_el_deg", 0.0)
+            deltas[pix_label] = (float(az_value or 0.0), float(el_value or 0.0))
     return deltas
 
 
