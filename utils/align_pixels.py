@@ -60,16 +60,16 @@ def align_images(data1, wcs1, data2, wcs2, initial_shift=(0, 0)):
             np.isfinite(pix_coords[0]) &
             np.isfinite(pix_coords[1]) &
             (pix_coords[0] >= 0) &
-            (pix_coords[0] < data1.shape[1]) &
+            (pix_coords[0] <= (data1.shape[1] - 1)) &
             (pix_coords[1] >= 0) &
-            (pix_coords[1] < data1.shape[0]) &
+            (pix_coords[1] <= (data1.shape[0] - 1)) &
             np.isfinite(data2)
         )
         if not np.any(valid):
             return np.inf
 
         # Interpolate data1 at the mapped pixel coordinates
-        aligned_data = map_coordinates(data1, [pix_coords[1], pix_coords[0]], order=1, mode='constant', cval=np.nan)
+        aligned_data = map_coordinates(data1, [pix_coords[1], pix_coords[0]], order=1, mode='constant', cval=0.0)
 
         # Compute robust error over overlapping valid data only.
         valid &= np.isfinite(aligned_data)
@@ -137,6 +137,8 @@ def main():
         print("WARNING: minimizer did not fully converge:", result.message)
 
     # Use the selected region center as the galactic reference point.
+    # Using 0-indexed Python array coordinates, center pixel is (size - 1) / 2.
+    # Keep floating-point center (instead of integer division) for exact WCS interpolation.
     y_center = (cropped_data1.shape[0] - 1) / 2.0
     x_center = (cropped_data1.shape[1] - 1) / 2.0
     reference_lon, reference_lat = cropped_wcs1.wcs_pix2world(x_center, y_center, 0)
