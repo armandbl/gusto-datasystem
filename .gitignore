@@ -13,6 +13,9 @@ build/
 .Venv/
 venv/
 .venv-linux/
+.claude/
+CLAUDE.md
+.gitignore
 
 # IDE
 .vscode/

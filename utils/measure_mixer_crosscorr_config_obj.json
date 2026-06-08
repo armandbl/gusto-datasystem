@@ -4,13 +4,7 @@
   "run": "obj1",
   "measurements_output": "Data/level2/crosscorr_measurements.csv",
   "delta_output": "Data/level2/crosscorr_deltas.csv",
-  "auto_detect_observer": false,
-  "observer": {
-    "lat_deg": -78.0,
-    "lon_deg": 60.0,
-    "alt_m": 36000.0,
-    "obs_time_utc": "2024-01-19T17:35:00"
-  },
+  "auto_detect_observer": true,
   "sources": [
     "G337"
   ],
