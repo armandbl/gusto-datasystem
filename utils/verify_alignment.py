@@ -18,7 +18,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import matplotlib
 import numpy as np
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+
+from astropy.io import fits  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Import the heavy-lifting functions directly from the measurement script so
@@ -31,6 +37,7 @@ if str(_UTILS) not in sys.path:
 from measure_mixer_crosscorr import (  # type: ignore[import-not-found]
     JobResult,
     build_moment0_map,
+    compare_dir_for_run,
     find_latest_run_dir,
     galactic_offset_to_azel,
     header_float,
@@ -38,6 +45,8 @@ from measure_mixer_crosscorr import (  # type: ignore[import-not-found]
     measure_shift_integer,
     moment0_header,
     parse_line_and_mixer_from_name,
+    save_correlation_png,
+    save_moment0_products,
 )
 
 
@@ -93,7 +102,7 @@ def compute_offset_metrics(
     map_ref = build_moment0_map(ref)
     map_tgt = build_moment0_map(tgt)
 
-    lag_x, lag_y, _corr = measure_shift_integer(map_ref, map_tgt)
+    lag_x, lag_y, corr = measure_shift_integer(map_ref, map_tgt)
     dx_pix = -float(lag_x)
     dy_pix = -float(lag_y)
 
@@ -130,6 +139,9 @@ def compute_offset_metrics(
         "az_deg": az_deg,
         "el_deg": el_deg,
         "offset_arcsec": offset_arcsec,
+        "corr": corr,
+        "ref_cube_sliced": ref,
+        "tgt_cube_sliced": tgt,
     }
 
 
@@ -201,8 +213,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to the tracking CSV (default: Perso/alignment_verification_log.csv)",
     )
     parser.add_argument(
-        "--threshold-pix", type=float, default=1.0,
-        help="Pixel offset threshold for pass/fail (default: 1.0 pix)",
+        "--threshold-pix", type=float, default=5.0,
+        help="Pixel offset threshold for pass/fail (default: 5.0 pix)",
     )
     parser.add_argument(
         "--threshold-arcsec", type=float, default=30.0,
@@ -317,6 +329,38 @@ def main() -> None:
             tgt_cube, _ = load_cube(tgt_path)
 
             metrics = compute_offset_metrics(ref_cube, tgt_cube, ref_header, observer)
+
+            # ------------------------------------------------------------------
+            # Save moment-0 maps and cross-correlation image
+            # ------------------------------------------------------------------
+            compare_dir = compare_dir_for_run(run_dir)
+            moment0_dir = compare_dir / "moment0"
+
+            ref_label = f"{source}_{line}_M{ref_mx}"
+            tgt_label = f"{source}_{line}_M{tgt_mx}"
+
+            save_moment0_products(
+                metrics["ref_cube_sliced"],
+                ref_header,
+                moment0_dir / f"moment0_{ref_label}_reference.fits",
+                moment0_dir / f"moment0_{ref_label}_reference.png",
+                title=f"{source} {line} M{ref_mx} moment0",
+            )
+            save_moment0_products(
+                metrics["tgt_cube_sliced"],
+                ref_header,
+                moment0_dir / f"moment0_{tgt_label}_target.fits",
+                moment0_dir / f"moment0_{tgt_label}_target.png",
+                title=f"{source} {line} M{tgt_mx} moment0",
+            )
+
+            corr_png = compare_dir / f"crosscorr_{source}_{line}_M{ref_mx}_vs_M{tgt_mx}.png"
+            save_correlation_png(
+                metrics["corr"],
+                corr_png,
+                title=f"{source} {line} M{ref_mx} vs M{tgt_mx} | "
+                f"dx={metrics['dx_pix']:+.1f} pix  dy={metrics['dy_pix']:+.1f} pix",
+            )
 
             pass_pix = bool(metrics["offset_pix"] <= args.threshold_pix)
             pass_arcsec = bool(

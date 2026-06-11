@@ -331,7 +331,13 @@ def header_float(header: fits.Header, key: str, default: float = 0.0) -> float:
         return float(default)
 
 
-def save_correlation_png(corr: np.ndarray, out_path: Path, title: str) -> None:
+def save_correlation_png(
+    corr: np.ndarray,
+    out_path: Path,
+    title: str,
+    peak_x: int | None = None,
+    peak_y: int | None = None,
+) -> None:
     fig = plt.figure(figsize=(7, 6), dpi=140)
     ax = fig.add_subplot(111)
     im = ax.imshow(corr, origin="lower", cmap="viridis", aspect="auto")
@@ -339,6 +345,28 @@ def save_correlation_png(corr: np.ndarray, out_path: Path, title: str) -> None:
     ax.set_xlabel("X lag index")
     ax.set_ylabel("Y lag index")
     plt.colorbar(im, ax=ax, label="Correlation")
+
+    # Auto-detect peak if not explicitly provided
+    if peak_x is None or peak_y is None:
+        peak_y, peak_x = np.unravel_index(np.argmax(corr), corr.shape)
+        peak_x = int(peak_x)
+        peak_y = int(peak_y)
+
+    center_y, center_x = (s // 2 for s in corr.shape)
+    dx = center_x - peak_x
+    dy = center_y - peak_y
+    ax.plot(peak_x, peak_y, "r+", markersize=14, markeredgewidth=2.5)
+    ax.annotate(
+        f"peak=({peak_x},{peak_y})\ndx={dx:+d}, dy={dy:+d}",
+        xy=(peak_x, peak_y),
+        xytext=(10, 10),
+        textcoords="offset points",
+        color="red",
+        fontsize=9,
+        fontweight="bold",
+        bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8),
+    )
+
     fig.tight_layout()
     fig.savefig(str(out_path))
     plt.close(fig)
