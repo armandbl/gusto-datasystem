@@ -40,6 +40,7 @@ from measure_mixer_crosscorr import (  # type: ignore[import-not-found]
     compare_dir_for_run,
     find_latest_run_dir,
     galactic_offset_to_azel,
+    get_observer_metadata,
     header_float,
     load_cube,
     measure_shift_integer,
@@ -254,21 +255,6 @@ def resolve_line_targets(
     }
 
 
-def resolve_observer(
-    config: dict[str, object] | None,
-) -> tuple[float, float, float, str] | None:
-    if config:
-        obs = config.get("observer")
-        if isinstance(obs, dict):
-            lat = obs.get("lat_deg")
-            lon = obs.get("lon_deg")
-            alt = obs.get("alt_m")
-            time = obs.get("obs_time_utc")
-            if all(v is not None for v in (lat, lon, alt, time)):
-                return (float(lat), float(lon), float(alt), str(time))
-    return None
-
-
 def main() -> None:
     args = build_parser().parse_args()
 
@@ -297,18 +283,32 @@ def main() -> None:
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     line_targets = resolve_line_targets(config, args.line_targets)
-    observer = resolve_observer(config)
 
     repo_root = _UTILS.parent
+    data_root = (repo_root / args.data_root).resolve()
     output_csv = (repo_root / args.output_csv).resolve()
     output_csv.parent.mkdir(parents=True, exist_ok=True)
+
+    has_auto_detect = (
+        isinstance(config, dict)
+        and config.get("auto_detect_observer", False)
+    )
+    has_explicit_obs = (
+        isinstance(config, dict)
+        and isinstance(config.get("observer"), dict)
+    )
 
     print(f"Run dir:      {run_dir}")
     print(f"Source:       {source}")
     print(f"Label:        {label}")
     print(f"Tracking CSV: {output_csv}")
     print(f"Thresholds:   {args.threshold_pix:.1f} pix  /  {args.threshold_arcsec:.0f} arcsec")
-    print(f"Observer:     {'configured' if observer else 'NONE (pixel-only scoring)'}")
+    if has_explicit_obs:
+        print(f"Observer:     explicit config")
+    elif has_auto_detect:
+        print(f"Observer:     auto-detect from Level-1 telemetry")
+    else:
+        print(f"Observer:     NONE (pixel-only scoring)")
     print()
 
     total_pairs = 0
@@ -316,6 +316,9 @@ def main() -> None:
     passed_arcsec = 0
 
     for line, (ref_mx, tgt_mxs) in sorted(line_targets.items()):
+        # Resolve observer metadata per line (observation time varies by line)
+        observer = get_observer_metadata(config or {}, data_root, source, line)
+
         pairs = find_reference_and_targets(run_dir, line, ref_mx, tgt_mxs)
         if not pairs:
             print(f"[{line}] No target cubes found — skipping\n")
@@ -354,12 +357,23 @@ def main() -> None:
                 title=f"{source} {line} M{tgt_mx} moment0",
             )
 
+            # Compute Galactic offsets for annotation
+            cdelt1 = header_float(ref_header, "CDELT1", 0.0)
+            cdelt2 = header_float(ref_header, "CDELT2", 0.0)
+            dlon_deg = metrics["dx_pix"] * cdelt1 if cdelt1 != 0.0 else None
+            dlat_deg = metrics["dy_pix"] * cdelt2 if cdelt2 != 0.0 else None
+
             corr_png = compare_dir / f"crosscorr_{source}_{line}_M{ref_mx}_vs_M{tgt_mx}.png"
             save_correlation_png(
                 metrics["corr"],
                 corr_png,
-                title=f"{source} {line} M{ref_mx} vs M{tgt_mx} | "
-                f"dx={metrics['dx_pix']:+.1f} pix  dy={metrics['dy_pix']:+.1f} pix",
+                title=(
+                    f"{source} {line} M{ref_mx} vs M{tgt_mx}"
+                ),
+                dx_pix=metrics["dx_pix"],
+                dy_pix=metrics["dy_pix"],
+                dlon_deg=dlon_deg,
+                dlat_deg=dlat_deg,
             )
 
             pass_pix = bool(metrics["offset_pix"] <= args.threshold_pix)
