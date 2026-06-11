@@ -1,8 +1,9 @@
 path = /media/armand/SSD_ARMAND/gusto-datasystem/Data
 band = [1, 2]
 cpus = 20
-scanid = [4000, 8000]
+scanid = [19546, 25842]
 level = 1.0
+source = G348
 polyorder = 3
 rowflagfilter = 0
 calmethod = cal_weightedHOTs

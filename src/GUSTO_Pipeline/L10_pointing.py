@@ -55,8 +55,8 @@ def L10_Pipeline(args, scanRange, verbose=False):
         
     logger.info('Number of cores used for processing: %i\n'%(n_procs))
     
-    inDir = args.path + 'level0.9/G337/'
-    outDir = args.path + 'level1/G337/'
+    inDir = args.path + 'level0.9/' + args.source + '/'
+    outDir = args.path + 'level1/' + args.source + '/'
     os.makedirs(outDir, exist_ok=True)
     if args.erase:
         clear_folder(outDir)

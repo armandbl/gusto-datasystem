@@ -337,6 +337,10 @@ def save_correlation_png(
     title: str,
     peak_x: int | None = None,
     peak_y: int | None = None,
+    dx_pix: float | None = None,
+    dy_pix: float | None = None,
+    dlon_deg: float | None = None,
+    dlat_deg: float | None = None,
 ) -> None:
     fig = plt.figure(figsize=(7, 6), dpi=140)
     ax = fig.add_subplot(111)
@@ -352,12 +356,20 @@ def save_correlation_png(
         peak_x = int(peak_x)
         peak_y = int(peak_y)
 
+    # Build annotation lines
     center_y, center_x = (s // 2 for s in corr.shape)
-    dx = center_x - peak_x
-    dy = center_y - peak_y
+    annot_lines = [f"Peak: ({peak_x}, {peak_y})"]
+    if dx_pix is not None and dy_pix is not None:
+        annot_lines.append(f"Pixel shift: ({dx_pix:+.1f}, {dy_pix:+.1f}) pix")
+    if dlon_deg is not None and dlat_deg is not None:
+        annot_lines.append(
+            f"Galactic: ({dlon_deg:+.4f}°, {dlat_deg:+.4f}°)"
+        )
+    annot_text = "\n".join(annot_lines)
+
     ax.plot(peak_x, peak_y, "r+", markersize=14, markeredgewidth=2.5)
     ax.annotate(
-        f"peak=({peak_x},{peak_y})\ndx={dx:+d}, dy={dy:+d}",
+        annot_text,
         xy=(peak_x, peak_y),
         xytext=(10, 10),
         textcoords="offset points",
@@ -548,7 +560,17 @@ def process_job(data_root: Path, job: Job, config: dict[str, object]) -> JobResu
         coord_method = "cdelt_fallback"
 
     corr_png = compare_dir / f"crosscorr_{job.source}_{job.line}_M{job.target_mixer}_vs_M{job.mixer}.png"
-    save_correlation_png(corr, corr_png, title=f"{job.source} {job.line} M{job.target_mixer} vs M{job.mixer} | lag=({lag_x},{lag_y})")
+    save_correlation_png(
+        corr,
+        corr_png,
+        title=(
+            f"{job.source} {job.line} M{job.target_mixer} vs M{job.mixer}"
+        ),
+        dx_pix=dx_pix,
+        dy_pix=dy_pix,
+        dlon_deg=dlon_deg,
+        dlat_deg=dlat_deg,
+    )
 
     return JobResult(
         source=job.source,
