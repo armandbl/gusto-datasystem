@@ -1,5 +1,4 @@
 import argparse
-import re
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -12,97 +11,16 @@ from GUSTOgridder import line_intensity_limits
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from viz_helpers import (
+    find_latest_run_dir,
+    line_from_filename,
+    mixer_from_filename,
+    spatial_plot_metadata,
+    spectral_axis_mps,
+    velocity_label,
+)
 
-RUN_PATTERN = re.compile(r"^run\s+(\d+)$", re.IGNORECASE)
-LINE_PATTERN = re.compile(r"(CII|NII)", re.IGNORECASE)
-MIXER_PATTERN = re.compile(r"_(\d+)", re.IGNORECASE)
 MIXER_ORDER = {"0": 0, "2": 2, "3": 3, "5": 5, "6": 6, "8": 8}
-
-
-def find_run_dir(base_dir: Path, run: str) -> Path:
-    if run.lower() == "latest":
-        candidates = []
-        for child in base_dir.iterdir():
-            if not child.is_dir():
-                continue
-            match = RUN_PATTERN.match(child.name)
-            if match:
-                candidates.append((int(match.group(1)), child))
-        if not candidates:
-            raise FileNotFoundError(f"No run directories found under {base_dir}")
-        return sorted(candidates, key=lambda item: item[0])[-1][1]
-
-    run_dir = base_dir / f"run {run}"
-    if not run_dir.exists():
-        raise FileNotFoundError(f"Run directory does not exist: {run_dir}")
-    return run_dir
-
-
-def spectral_axis_mps(header: fits.Header, nchan: int) -> np.ndarray:
-    """Return spectral axis in meters per second (m/s).
-
-    Assumes CRVAL3/CDELT3 are in the units specified by CUNIT3.
-
-    The GUSTO cubes in this repo frequently use values between about -200 and 200,
-    which is consistent with m/s (not km/s). This function forces m/s.
-    """
-
-    crval = float(header.get("CRVAL3", 0.0))
-    cdelt = float(header.get("CDELT3", 1.0))
-    crpix = float(header.get("CRPIX3", 1.0))
-    cunit = str(header.get("CUNIT3", "")).strip().lower()
-
-    axis = crval + ((np.arange(nchan) + 1.0) - crpix) * cdelt
-
-    if "km/s" in cunit or "kms" in cunit:
-        return axis * 1000.0
-
-    # Treat m/s (and unknown) as m/s.
-    return axis
-
-
-def line_from_filename(file_path: Path) -> Optional[str]:
-    match = LINE_PATTERN.search(file_path.name)
-    if not match:
-        return None
-    return match.group(1).upper()
-
-
-def mixer_from_filename(file_path: Path) -> Optional[str]:
-    match = MIXER_PATTERN.search(file_path.name)
-    if not match:
-        return None
-    return match.group(1)
-
-
-def velocity_label(value: float) -> str:
-    # value is m/s
-    return f"{value:+06.1f}".replace("+", "p").replace("-", "m")
-
-
-def spatial_plot_metadata(header: fits.Header, frame: np.ndarray) -> Tuple[List[float], str, str]:
-    ny, nx = frame.shape
-    crval1 = float(header.get("CRVAL1", 0.0))
-    crpix1 = float(header.get("CRPIX1", 1.0))
-    cdelt1 = float(header.get("CDELT1", 1.0))
-    ctype1 = str(header.get("CTYPE1", "X")).split("-")[0].strip() or "X"
-    cunit1 = str(header.get("CUNIT1", "deg")).strip() or "deg"
-
-    crval2 = float(header.get("CRVAL2", 0.0))
-    crpix2 = float(header.get("CRPIX2", 1.0))
-    cdelt2 = float(header.get("CDELT2", 1.0))
-    ctype2 = str(header.get("CTYPE2", "Y")).split("-")[0].strip() or "Y"
-    cunit2 = str(header.get("CUNIT2", "deg")).strip() or "deg"
-
-    x0 = crval1 + ((1.0 - crpix1) * cdelt1)
-    x1 = crval1 + ((float(nx) - crpix1) * cdelt1)
-    y0 = crval2 + ((1.0 - crpix2) * cdelt2)
-    y1 = crval2 + ((float(ny) - crpix2) * cdelt2)
-
-    extent = [x0, x1, y0, y1]
-    xlabel = f"{ctype1} [{cunit1}]"
-    ylabel = f"{ctype2} [{cunit2}]"
-    return extent, xlabel, ylabel
 
 
 def extract_slice_frame(
@@ -281,7 +199,7 @@ def main() -> None:
         run_dir = Path(args.run_dir).resolve()
     else:
         base_dir = repo_root / "Data" / "level2" / args.source
-        run_dir = find_run_dir(base_dir, str(args.run))
+        run_dir = find_latest_run_dir(base_dir, str(args.run))
 
     if not run_dir.exists():
         raise FileNotFoundError(f"Run directory does not exist: {run_dir}")

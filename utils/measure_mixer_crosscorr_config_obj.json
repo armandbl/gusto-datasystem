@@ -1,26 +1,13 @@
 {
   "data_root": "Data/level2",
   "offsets_file": "src/GUSTO_Pipeline/calib/offsets.txt",
-  "run": "latest",
+  "run": "obj1",
   "measurements_output": "Data/level2/crosscorr_measurements.csv",
   "delta_output": "Data/level2/crosscorr_deltas.csv",
   "auto_detect_observer": true,
-  "sources": [
-    "G348"
-  ],
+  "sources": ["G337"],
   "line_targets": {
-    "CII": {
-      "target_mixer": 8,
-      "mixers": [
-        5
-      ]
-    },
-    "NII": {
-      "target_mixer": 3,
-      "mixers": [
-        2,
-        6
-      ]
-    }
+    "CII": {"target_mixer": 8, "mixers": [5]},
+    "NII": {"target_mixer": 3, "mixers": [2, 6]}
   }
 }

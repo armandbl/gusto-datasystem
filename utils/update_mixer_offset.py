@@ -1,261 +1,269 @@
-import numpy as np
-import glob
-import os
-import time
+#!/usr/bin/env python3
+"""Apply fractional mixer-offset corrections to SDFITS files.
 
-from astropy.table import Table
-from astropy.io import fits
-from astropy.table import vstack
-from astropy import units as u
-from astropy import constants
+Reads per-mixer calibration offsets from a text table (same format as
+``offsets.txt``) and applies a fractional correction to the RA/DEC of
+every row in a FITS file, updating the file in-place.
 
+This is a legacy utility superseded by the :ref:`alignment pipeline`
+(``measure_mixer_crosscorr`` → ``apply_offset_deltas`` → ``runGUSTO``).
+"""
 
-import struct
-from astropy.coordinates import EarthLocation,SkyCoord
-from astropy.time import Time
-from astropy.coordinates import AltAz
+from __future__ import annotations
+
 import datetime
-import argparse
 import importlib
+from pathlib import Path
+from typing import Optional, Sequence
+
+import numpy as np
+from astropy import units as u
+from astropy.coordinates import AltAz, EarthLocation, SkyCoord
+from astropy.io import fits
+from astropy.time import Time
+
+# Use configargparse if available, plain argparse otherwise.
 try:
-    _argparse_backend = importlib.import_module('configargparse')
+    _argparse_backend = importlib.import_module("configargparse")
 except ModuleNotFoundError:
-    _argparse_backend = argparse
+    import argparse as _argparse_backend  # type: ignore[no-redef]
 
 
-def get_cal_mixer_offsets(calib_file):
-    f = open(calib_file,'r')
-    offsets=[]
-    azoffs=[]
-    eloffs=[]
-    bm = []
-    for line in f:
-        line.strip('\n')
-        if line[0] == 'B':
-            # read offset data
-            txt = line.split('\t')
-            bmname=txt[0]
-            azoff1 = float(txt[1])
-            eloff1 = float(txt[2])
-            mtype  = txt[3]
-            off1 = [azoff1,eloff1]
-            bm.append([bmname,mtype])
-            azoffs.append(azoff1)
-            eloffs.append(eloff1)
-    #return offset in arcmin
-    azoffs = np.array(azoffs)*60
-    eloffs = np.array(eloffs)*60
-    bm = np.array(bm)
-    #bm is band / mixer identifier and theory/measured
-    # BxMy  THEORY/AS_MEASRURED
-    f.close()
-    return( azoffs, eloffs , bm )
+# ---------------------------------------------------------------------------
+# Calibration table reader
+# ---------------------------------------------------------------------------
 
-def unix2time(unixtime, utime):
-    return [datetime.datetime.fromtimestamp(a) for a in utime]
 
-def history_test(hdr,history_phrase,verbose=False):
+def get_cal_mixer_offsets(
+    calib_file: Path,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Read mixer offsets from *calib_file*.
+
+    Returns
+    -------
+    azoffs : np.ndarray
+        Azimuth offsets in **arcminutes**.
+    eloffs : np.ndarray
+        Elevation offsets in **arcminutes**.
+    bm : np.ndarray
+        String array of ``(mixer_label, offset_type)`` pairs,
+        shape ``(N, 2)``.
     """
-    
-    test FITS header history key words or a specfic phrase.
-    If phrase exists in header return True,  if no HISTORY or phrase not found return False.
-    
+    bm: list[tuple[str, str]] = []
+    azoffs: list[float] = []
+    eloffs: list[float] = []
+
+    with calib_file.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("B"):
+                # header / non-data
+                if not stripped.startswith("B"):
+                    continue
+            else:
+                continue
+
+            cols = stripped.split("\t")
+            if len(cols) < 4:
+                continue
+
+            bm.append((cols[0], cols[3].strip()))
+            azoffs.append(float(cols[1]))
+            eloffs.append(float(cols[2]))
+
+    return (
+        np.array(azoffs) * 60.0,   # → arcmin
+        np.array(eloffs) * 60.0,
+        np.array(bm),
+    )
+
+
+# ---------------------------------------------------------------------------
+# FITS history helpers
+# ---------------------------------------------------------------------------
+
+
+def history_test(hdr: fits.Header, phrase: str, verbose: bool = False) -> bool:
+    """Return True if *phrase* is present in the HISTORY cards of *hdr*."""
+    history_list = hdr.get("HISTORY")
+    if history_list is None:
+        if verbose:
+            print(f"HISTORY not in header: applying '{phrase}'")
+        return False
+
+    if phrase in history_list:
+        if verbose:
+            print(f"'{phrase}' present in HISTORY")
+        return True
+    else:
+        if verbose:
+            print(f"'{phrase}' not found in HISTORY")
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Offset application
+# ---------------------------------------------------------------------------
+
+
+def update_mixer_offset(
+    foff: Sequence[float],
+    hdr0: fits.Header,
+    ra: np.ndarray,
+    dec: np.ndarray,
+    obstime: Time,
+    band: int,
+    mix: int,
+    calib_file: Path,
+    verbose: bool = False,
+) -> SkyCoord:
+    """Apply a fractional mixer offset to an RA/DEC position.
+
+    Parameters
+    ----------
+    foff : (faz, falt)
+        Fractional scale factors for azimuth and altitude offsets.
+    hdr0 : fits.Header
+        Primary header containing ``GON_LAT``, ``GON_LON``, ``GON_ALT``.
+    ra, dec : np.ndarray
+        Right ascension and declination in degrees.
+    obstime : Time
+        Observation time.
+    band : int
+        Band number (1 = NII, 2 = CII).
+    mix : int
+        Mixer number (1-8).
+    calib_file : Path
+        Path to the calibration offsets file.
+    verbose : bool
+        Print additional diagnostics.
     """
-    if 'HISTORY' not in hdr:
-        if verbose: 
-            print(f'HISTORY not in {hdr}: Applying {history_phrase}')
-        return(False)
-    else: 
-        history_list = hdr.get('HISTORY')
-        if f'{history_phrase}' in history_list:
-            if verbose: 
-                print(f'{history_phrase} present')
-            return(True)
-        else:
-            if verbose:
-                print(f'{history_phrase} not found')
-            return(False)
+    balloon = EarthLocation(
+        lat=hdr0["GON_LAT"] * u.deg,
+        lon=hdr0["GON_LON"] * u.deg,
+        height=hdr0["GON_ALT"] * u.m,
+    )
 
-
-
-
-def update_mixer_offset(foff,hdr0, ra, dec,otime, band, mix, calib_file,verbose=False):
-    """
-    Function Applies a fractional offset to each mixer for band 1
-    Input:  fraction_upate, fraction of original offsets to be added for new offset (azimuth, altitude)
-    Input:  ra,dec,otime of sample postion:  in EXT 1 of FITS file
-            lat,lon altitude of balloon  in header EXT[0] of 0.7 product
-            band: 1 or 2 N+ or C+
-            mix:  mixer (1-8) in band
-    Output: updated RA/DEC of mixer at unixtime
-    Output: hdr0 is updated with HISTORY field 
-    
-    
-    """
-    balloon = EarthLocation(lat=hdr0['GON_LAT']*u.deg, lon=hdr0['GON_LON']*u.deg, height=hdr0['GON_ALT']*u.m)
-
-    #obstime = self.unix2time(self.ttime)
-    #obstime = unix2time(unixtime)
     faz = float(foff[0])
-    falt= float(foff[1])
+    falt = float(foff[1])
 
-    aa = AltAz(location=balloon, obstime=otime)
-
-    #coord = SkyCoord(self.ra*u.rad, self.dec*u.rad, frame='icrs')
-    coord = SkyCoord(ra*u.deg, dec*u.deg, frame='icrs')
+    aa = AltAz(location=balloon, obstime=obstime)
+    coord = SkyCoord(ra * u.deg, dec * u.deg, frame="icrs")
     altaz = coord.transform_to(aa)
 
-    #Open the Mixer offset calibration file
     azoffset, aloffset, bm = get_cal_mixer_offsets(calib_file)
-    # get beam offsets:
+    mname = f"B{band}M{mix}"
+    indx = np.argwhere(bm[:, 0] == mname).flatten()
 
-    azoffm=[]
-    aloffm=[]
-    #for ix, mx in enumerate(mix):
-    mName = f'B{band}M{mix}'
-    indx = np.argwhere(bm[:,0] == mName).flatten()
+    if len(indx) == 0:
+        raise ValueError(f"Mixer {mname} not found in {calib_file}")
 
-    #use the last entry to get AS_MEASURED values if present
-    azoffm.append( azoffset[indx[-1]] )
-    aloffm.append( aloffset[indx[-1]] )
+    # Use the last entry to get AS_MEASURED values if present
+    azoffm = float(azoffset[indx[-1]]) / 60.0   # arcmin → deg
+    aloffm = float(aloffset[indx[-1]]) / 60.0
 
-    #convert to decimal degrees
-    azoffm = np.array(azoffm)/60.0
-    aloffm = np.array(aloffm)/60.0
-        
-        
-
-
-
-    # apply beam offsets
     if band == 1:
-        naz = (altaz.az.deg  - azoffm  + faz * azoffm) * u.deg
-        nalt =(altaz.alt.deg - aloffm  + falt* aloffm) * u.deg
+        naz = (altaz.az.deg - azoffm + faz * azoffm) * u.deg
+        nalt = (altaz.alt.deg - aloffm + falt * aloffm) * u.deg
     else:
-        #don't update band 2
-        naz = altaz.az.deg*u.deg 
-        nalt = altaz.alt.deg*u.deg 
-        
+        # Band 2 is not updated by this legacy utility.
+        naz = altaz.az.deg * u.deg
+        nalt = altaz.alt.deg * u.deg
+
+    ncc = SkyCoord(AltAz(az=naz, alt=nalt, obstime=obstime, location=balloon))
+    return ncc.transform_to("icrs")
 
 
-    # calculate new R.A. and Dec.
-    ncc = SkyCoord(AltAz(az=naz, alt=nalt, obstime=otime, location=balloon))
-    nradec = ncc.transform_to('icrs')
-    return(nradec)
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
-def main(args=None,verbose=True):
-    if args==None:
-        # Create the input parser
-        my_parser = _argparse_backend.ArgumentParser(prog='update_mixer_offset',
-                                            usage='%(prog)s filetype directory ',
-                                            description='Update RA/DEC positions in GUTSO data file')
-        my_parser.version = "Version 0.0.1 (8 Dec 2025) "
-        my_parser.add_argument('-v', action='version')
 
-        my_parser.add_argument('-o',
-                               metavar='--foff',
-                               nargs = 2, 
-                               help = 'scale factor of calibration offsets (AZ, ALT)')
-        my_parser.add_argument('-r',
-                               metavar='--fileroot',
-                               type=str,
-                               required=True,
-                               help='Name of data file to be updated.')
-        my_parser.add_argument('-d',
-                               metavar='--directory',
-                               required = False,
-                               default = '/data/scratch/GUSTO/gusto-datasystem/Data/level1/',
-                               type=str,
-                               help='Path to data directory')
+def main(args: Optional[list[str]] = None) -> None:
+    parser = _argparse_backend.ArgumentParser(
+        prog="update_mixer_offset",
+        description="Update RA/DEC positions in GUSTO data files "
+                    "by applying fractional mixer offsets.",
+    )
+    parser.add_argument("-v", action="version", version="Version 0.1.0")
+    parser.add_argument(
+        "-o", "--foff", nargs=2, metavar="FRAC",
+        help="Scale factors for calibration offsets (AZ ALT)",
+    )
+    parser.add_argument(
+        "-r", "--fileroot", required=True,
+        help="Name (glob prefix) of data file(s) to update.",
+    )
+    parser.add_argument(
+        "-d", "--directory",
+        default="/data/scratch/GUSTO/gusto-datasystem/Data/level1/",
+        help="Path to data directory (default: %(default)s)",
+    )
+    parser.add_argument(
+        "-c", "--calib-file",
+        default="/data/scratch/GUSTO/gusto-datasystem/calib/cal_offsets.txt",
+        help="Path to calibration offsets file (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--check", action="store_true",
+        help="Dry-run: only report which scans would be updated.",
+    )
 
-        my_parser.add_argument('-c',
-                               metavar='--calib_file',
-                               default = '/data/scratch/GUSTO/gusto-datasystem/calib/cal_offsets.txt',
-                               type=str,
-                               help='Path to calibration directory')
+    parsed = parser.parse_args(args)
 
-        my_parser.add_argument('-check',
-                               metavar='--checkifdone',
-                               default = '0',
-                               type=str,
-                               help='Only check which scans ready applied, make no changes 1 to not to apply, 0 to apply')
-        args = my_parser.parse_args()
-    
+    if parsed.foff is None:
+        parser.error("--foff is required (e.g. --foff 1.0 0.5)")
 
-    
-    #print(my_parser.format_values())
-    #print(args)
-    fileroot=args.r
-    directory =args.d
-    calib_file = args.c
-    foff = np.array(args.o)
-    if args.check != '0':
-        check = True
-    else:
-        check = False
-    #print(f'{directory}/{fileroot}*.fits')
+    fileroot = parsed.fileroot
+    directory = Path(parsed.directory)
+    calib_file = Path(parsed.calib_file)
+    foff = np.array(parsed.foff, dtype=float)
+    check_only: bool = parsed.check
 
-    to_process_files = sorted(glob.glob(f'{directory}/{fileroot}*.fits'))
-    to_process_files = np.array(to_process_files).flatten()
-    #print(to_process_files.shape)
-    utc0=np.datetime64("1970-01-01T00:00:00",'s') 
-    for infile in to_process_files:
+    pattern = f"{fileroot}*.fits"
+    to_process = sorted(directory.glob(pattern))
 
-        hdu=fits.open(infile,mode = 'update')
-        hdr0=hdu[0].header
+    history_phrase = "Mixer Offsets Updated for Band 1"
+    utc0 = np.datetime64("1970-01-01T00:00:00", "s")
 
-        # Set the history phrase to be added to FITS header
-        history_phrase = f'Mixer Offsets Updated for Band 1'
+    for infile in to_process:
+        with fits.open(infile, mode="update") as hdu:
+            hdr0 = hdu[0].header
 
-        in_history = history_test(hdr0,history_phrase,verbose=True)
-        
-        if not in_history:
-            # Collect needed parameter to apply a mixer offset postion
-            hdr1=hdu[1].header
-            data=hdu[1].data
-    
-            #extract data arrays from fits file
-            mixer = data['mixer']
-            unixtime=data['unixtime']
-            # 'time' of observation
-            otime = np.median(unixtime)
-            ra=data['RA']
-            dec=data['DEC']
-            mixers = data['mixer']
+            if history_test(hdr0, history_phrase, verbose=True):
+                print(f"Offsets already applied: {infile.name} — skipping")
+                continue
 
-            mixer = np.unique(mixers)
-            
-    
-            band   = int(hdu[0].header['BAND'])
-            
-            #median time of observation time
-            obstime = utc0 + np.timedelta64(int(otime*1000),'ms')
-            if not check:
-                for mx in mixer:
-                    
-                    qmx = data['mixer'] == mx
-                    mra = data['RA'][qmx]
-                    mdec= data['DEC'][qmx]
-                    #apply offsets for each mixer
-                    nradec = update_mixer_offset(foff,hdr0, mra, mdec, obstime, band, mx, calib_file,verbose=False)
-                    newra  = nradec.ra.deg
-                    newdec = nradec.dec.deg
-                    #Write back to fits array
-                    data['RA'][qmx] = np.array(newra)
-                    data['DEC'][qmx]= np.array(newdec)
-    
-                #Write back to file
-                print(f'Updating {infile}')
-                hdu[0].header.add_history(history_phrase)
-                hdu.flush()
-            else:
-                print(f'{infile} would be updated')
-        else:
-            print(f'Offsets already applied: {infile} not updated)')
-        hdu.close()   
-        #print(to_process_files.shape)
-        #print(infile)
+            if check_only:
+                print(f"[dry-run] Would update: {infile.name}")
+                continue
+
+            data = hdu[1].data
+            mixers = np.unique(data["mixer"])
+            band = int(hdr0["BAND"])
+
+            otime = float(np.median(data["unixtime"]))
+            obstime = utc0 + np.timedelta64(int(otime * 1000), "ms")
+
+            for mx in mixers:
+                qmx = data["mixer"] == mx
+                nradec = update_mixer_offset(
+                    foff=foff,
+                    hdr0=hdr0,
+                    ra=data["RA"][qmx],
+                    dec=data["DEC"][qmx],
+                    obstime=obstime,
+                    band=band,
+                    mix=mx,
+                    calib_file=calib_file,
+                )
+                data["RA"][qmx] = np.array(nradec.ra.deg)
+                data["DEC"][qmx] = np.array(nradec.dec.deg)
+
+            print(f"Updating {infile.name}")
+            hdr0.add_history(history_phrase)
+            hdu.flush()
+
 
 if __name__ == "__main__":
     main()
-

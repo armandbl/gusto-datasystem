@@ -1,6 +1,9 @@
 # Data folder - large research files
 Data/
 Perso/
+# To include Perso/ in graphify, temporarily comment the line above
+# and run: /graphify . --update
+
 GUSTO_Pipeline.egg-info/
 
 # Python & build artifacts
@@ -16,6 +19,7 @@ venv/
 .claude/
 CLAUDE.md
 .gitignore
+graphify-out/
 
 # IDE
 .vscode/

@@ -19,7 +19,6 @@ Output goes to:
 from __future__ import annotations
 
 import argparse
-import re
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -30,70 +29,14 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-LINE_PATTERN = re.compile(r"(CII|NII)", re.IGNORECASE)
-MIXER_PATTERN = re.compile(r"_(\d+)", re.IGNORECASE)
-
-
-def spectral_axis_mps(header: fits.Header, nchan: int) -> np.ndarray:
-    """Return spectral axis in meters per second (m/s)."""
-    crval = float(header.get("CRVAL3", 0.0))
-    cdelt = float(header.get("CDELT3", 1.0))
-    crpix = float(header.get("CRPIX3", 1.0))
-    cunit = str(header.get("CUNIT3", "")).strip().lower()
-
-    axis = crval + ((np.arange(nchan) + 1.0) - crpix) * cdelt
-
-    if "km/s" in cunit or "kms" in cunit:
-        return axis * 1000.0
-
-    return axis
-
-
-def line_from_filename(file_path: Path) -> Optional[str]:
-    match = LINE_PATTERN.search(file_path.name)
-    if not match:
-        return None
-    return match.group(1).upper()
-
-
-def mixer_from_filename(file_path: Path) -> Optional[str]:
-    match = MIXER_PATTERN.search(file_path.name)
-    if not match:
-        return None
-    return match.group(1)
-
-
-def intensity_limits(line: str) -> Tuple[float, float]:
-    if line == "CII":
-        return (-1.0, 6.0)
-    elif line == "NII":
-        return (-1.0, 2.0)
-    return (-1.0, 1.0)
-
-
-def load_cube(path: Path) -> Tuple[np.ndarray, fits.Header]:
-    with fits.open(path) as hdul:
-        data = hdul[0].data
-        header = hdul[0].header
-
-    if data is None:
-        raise ValueError(f"No data in {path}")
-
-    data = np.squeeze(data)
-    if data.ndim != 3:
-        raise ValueError(f"Expected 3D cube in {path}, got shape={data.shape}")
-
-    return np.array(data, dtype=float), header
-
-
-def velocity_label(value_mps: float) -> str:
-    """Convert a velocity in m/s to a safe filename slug."""
-    return f"{value_mps:+06.1f}".replace("+", "p").replace("-", "m")
+from viz_helpers import (
+    intensity_limits,
+    line_from_filename,
+    load_cube,
+    mixer_from_filename,
+    spectral_axis_mps,
+    velocity_label,
+)
 
 
 # ---------------------------------------------------------------------------

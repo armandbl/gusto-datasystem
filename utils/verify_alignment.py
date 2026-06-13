@@ -39,13 +39,13 @@ from measure_mixer_crosscorr import (  # type: ignore[import-not-found]
     build_moment0_map,
     compare_dir_for_run,
     find_latest_run_dir,
-    galactic_offset_to_azel,
     get_observer_metadata,
     header_float,
     load_cube,
     measure_shift_integer,
     moment0_header,
     parse_line_and_mixer_from_name,
+    pixel_offset_to_azel,
     save_correlation_png,
     save_moment0_products,
 )
@@ -114,22 +114,13 @@ def compute_offset_metrics(
     offset_arcsec = float("nan")
 
     if observer is not None:
-        cdelt1 = header_float(ref_header, "CDELT1", 0.0)
-        cdelt2 = header_float(ref_header, "CDELT2", 0.0)
-        dlon_deg = dx_pix * cdelt1
-        dlat_deg = dy_pix * cdelt2
-        ref_glon = header_float(ref_header, "CRVAL1", 0.0)
-        ref_glat = header_float(ref_header, "CRVAL2", 0.0)
         try:
-            az_deg, el_deg = galactic_offset_to_azel(
-                observer[0], observer[1], observer[2], observer[3],
-                ref_glon, ref_glat, dlon_deg, dlat_deg,
+            az_deg, el_deg, _ = pixel_offset_to_azel(
+                dx_pix, dy_pix, ref_header, observer,
             )
             offset_arcsec = float(np.sqrt(az_deg**2 + el_deg**2)) * 3600.0
         except Exception:
-            az_deg = float("nan")
-            el_deg = float("nan")
-            offset_arcsec = float("nan")
+            pass
 
     return {
         "lag_x": lag_x,
@@ -347,7 +338,7 @@ def main() -> None:
                 ref_header,
                 moment0_dir / f"moment0_{ref_label}_reference.fits",
                 moment0_dir / f"moment0_{ref_label}_reference.png",
-                title=f"{source} {line} M{ref_mx} moment0",
+                title=f"{source} {line} M{ref_mx} moment0 (reference)",
             )
             save_moment0_products(
                 metrics["tgt_cube_sliced"],
@@ -355,6 +346,8 @@ def main() -> None:
                 moment0_dir / f"moment0_{tgt_label}_target.fits",
                 moment0_dir / f"moment0_{tgt_label}_target.png",
                 title=f"{source} {line} M{tgt_mx} moment0",
+                dx_pix=metrics["dx_pix"],
+                dy_pix=metrics["dy_pix"],
             )
 
             # Compute Galactic offsets for annotation

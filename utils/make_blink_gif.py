@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import argparse
 import io
-import re
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -32,100 +31,15 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from PIL import Image
 
-
-# ---------------------------------------------------------------------------
-# Helpers  (match existing scripts: make_comparison_movie.py,
-#           make_comparison_pngs.py, extract_cube_slices_png.py)
-# ---------------------------------------------------------------------------
-
-LINE_PATTERN = re.compile(r"(CII|NII)", re.IGNORECASE)
-MIXER_PATTERN = re.compile(r"_(\d+)", re.IGNORECASE)
-
-
-def spectral_axis_mps(header: fits.Header, nchan: int) -> np.ndarray:
-    """Return spectral axis in meters per second (m/s)."""
-    crval = float(header.get("CRVAL3", 0.0))
-    cdelt = float(header.get("CDELT3", 1.0))
-    crpix = float(header.get("CRPIX3", 1.0))
-    cunit = str(header.get("CUNIT3", "")).strip().lower()
-
-    axis = crval + ((np.arange(nchan) + 1.0) - crpix) * cdelt
-
-    if "km/s" in cunit or "kms" in cunit:
-        return axis * 1000.0
-
-    return axis
-
-
-def line_from_filename(file_path: Path) -> Optional[str]:
-    match = LINE_PATTERN.search(file_path.name)
-    if not match:
-        return None
-    return match.group(1).upper()
-
-
-def mixer_from_filename(file_path: Path) -> Optional[str]:
-    match = MIXER_PATTERN.search(file_path.name)
-    if not match:
-        return None
-    return match.group(1)
-
-
-def intensity_limits(line: str) -> Tuple[float, float]:
-    """Default display intensity limits in Kelvin-like units."""
-    if line == "CII":
-        return (-1.0, 6.0)
-    elif line == "NII":
-        return (-1.0, 2.0)
-    return (-1.0, 1.0)
-
-
-def load_cube(path: Path) -> Tuple[np.ndarray, fits.Header]:
-    with fits.open(path) as hdul:
-        data = hdul[0].data
-        header = hdul[0].header
-
-    if data is None:
-        raise ValueError(f"No data in {path}")
-
-    data = np.squeeze(data)
-    if data.ndim != 3:
-        raise ValueError(f"Expected 3D cube in {path}, got shape={data.shape}")
-
-    return np.array(data, dtype=float), header
-
-
-def spatial_plot_metadata(
-    header: fits.Header, frame: np.ndarray
-) -> Tuple[List[float], str, str]:
-    """Return extent [x0, x1, y0, y1] and axis labels for imshow."""
-    ny, nx = frame.shape
-    crval1 = float(header.get("CRVAL1", 0.0))
-    crpix1 = float(header.get("CRPIX1", 1.0))
-    cdelt1 = float(header.get("CDELT1", 1.0))
-    ctype1 = str(header.get("CTYPE1", "X")).split("-")[0].strip() or "X"
-    cunit1 = str(header.get("CUNIT1", "deg")).strip() or "deg"
-
-    crval2 = float(header.get("CRVAL2", 0.0))
-    crpix2 = float(header.get("CRPIX2", 1.0))
-    cdelt2 = float(header.get("CDELT2", 1.0))
-    ctype2 = str(header.get("CTYPE2", "Y")).split("-")[0].strip() or "Y"
-    cunit2 = str(header.get("CUNIT2", "deg")).strip() or "deg"
-
-    x0 = crval1 + ((1.0 - crpix1) * cdelt1)
-    x1 = crval1 + ((float(nx) - crpix1) * cdelt1)
-    y0 = crval2 + ((1.0 - crpix2) * cdelt2)
-    y1 = crval2 + ((float(ny) - crpix2) * cdelt2)
-
-    extent = [x0, x1, y0, y1]
-    xlabel = f"{ctype1} [{cunit1}]"
-    ylabel = f"{ctype2} [{cunit2}]"
-    return extent, xlabel, ylabel
-
-
-def velocity_slug(vel_mps: float) -> str:
-    """Convert a velocity in m/s to a safe filename token."""
-    return f"v{vel_mps:+.1f}".replace("+", "p").replace("-", "m").replace(".", "p")
+from viz_helpers import (
+    intensity_limits,
+    line_from_filename,
+    load_cube,
+    mixer_from_filename,
+    spatial_plot_metadata,
+    spectral_axis_mps,
+    velocity_slug,
+)
 
 
 # ---------------------------------------------------------------------------

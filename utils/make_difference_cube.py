@@ -1,10 +1,11 @@
 import argparse
-import re
 from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
 from astropy.io import fits
+
+from viz_helpers import find_latest_run_dir
 
 
 def shift2d_no_wrap(image: np.ndarray, shift_x: int, shift_y: int, fill_value: float = np.nan) -> np.ndarray:
@@ -65,26 +66,6 @@ def load_cube(path: Path) -> tuple[np.ndarray, fits.Header]:
     if data.ndim != 3:
         raise ValueError(f"Expected 3D cube in {path}, got shape={data.shape}")
     return np.array(data, dtype=float), header
-
-
-# ---------------------------------------------------------------------------
-# Auto-discovery helpers
-# ---------------------------------------------------------------------------
-
-RUN_PATTERN = re.compile(r"^run\s+(\d+)$", re.IGNORECASE)
-
-
-def find_latest_run_dir(source_dir: Path) -> Path:
-    """Return the highest-numbered ``run N`` directory under *source_dir*."""
-    runs: list[tuple[int, Path]] = []
-    for child in source_dir.iterdir():
-        if child.is_dir():
-            m = RUN_PATTERN.match(child.name)
-            if m:
-                runs.append((int(m.group(1)), child))
-    if not runs:
-        raise FileNotFoundError(f"No run directories found in {source_dir}")
-    return sorted(runs, key=lambda item: item[0])[-1][1]
 
 
 DEFAULT_LINE_TARGETS: dict[str, tuple[int, list[int]]] = {
