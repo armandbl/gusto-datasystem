@@ -5,8 +5,58 @@ from __future__ import annotations
 
 import argparse
 import csv
+from datetime import datetime, timezone
 from pathlib import Path
 
+
+# ---------------------------------------------------------------------------
+# Offset history tracking  (keeps a running log of every DELTA_APPLIED update)
+# ---------------------------------------------------------------------------
+
+TRACKING_FIELDS = [
+    "timestamp",
+    "mixer",
+    "old_az_deg",
+    "old_el_deg",
+    "new_az_deg",
+    "new_el_deg",
+    "delta_az_deg",
+    "delta_el_deg",
+    "source_deltas_csv",
+]
+
+
+def append_offset_history(
+    csv_path: Path,
+    mixer: str,
+    old_az: float,
+    old_el: float,
+    new_az: float,
+    new_el: float,
+    source_deltas_csv: str,
+) -> None:
+    """Append a single offset-change record to the tracking CSV."""
+    write_header = not csv_path.exists() or csv_path.stat().st_size == 0
+    with csv_path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=TRACKING_FIELDS)
+        if write_header:
+            writer.writeheader()
+        writer.writerow({
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "mixer": mixer,
+            "old_az_deg": f"{old_az:.6f}",
+            "old_el_deg": f"{old_el:.6f}",
+            "new_az_deg": f"{new_az:.6f}",
+            "new_el_deg": f"{new_el:.6f}",
+            "delta_az_deg": f"{new_az - old_az:.6f}",
+            "delta_el_deg": f"{new_el - old_el:.6f}",
+            "source_deltas_csv": source_deltas_csv,
+        })
+
+
+# ---------------------------------------------------------------------------
+# Core logic
+# ---------------------------------------------------------------------------
 
 def read_deltas(path: Path) -> dict[str, tuple[float, float]]:
     deltas: dict[str, tuple[float, float]] = {}
@@ -83,7 +133,10 @@ def _get_current_effective_offsets(
 
 
 def apply_deltas_to_offsets(
-    offsets_file: Path, deltas: dict[str, tuple[float, float]]
+    offsets_file: Path,
+    deltas: dict[str, tuple[float, float]],
+    history_csv: Path | None = None,
+    source_deltas_label: str = "",
 ) -> str:
     """Build a new offsets table with ``DELTA_APPLIED`` entries.
 
@@ -150,6 +203,34 @@ def apply_deltas_to_offsets(
         new_el = anchor[1] - del_
         computed[pix_label] = (new_az, new_el)
 
+    # --- Append offset-change history before stripping old values ----------
+    if history_csv is not None:
+        for pix_label, (new_az, new_el) in computed.items():
+            old = current_offsets.get(pix_label)
+            if old is not None:
+                append_offset_history(
+                    history_csv,
+                    mixer=pix_label,
+                    old_az=old[0],
+                    old_el=old[1],
+                    new_az=new_az,
+                    new_el=new_el,
+                    source_deltas_csv=source_deltas_label,
+                )
+            else:
+                # Mixer didn't have a prior effective offset — still record
+                # the first measurement, using 0.0 as the old baseline.
+                append_offset_history(
+                    history_csv,
+                    mixer=pix_label,
+                    old_az=0.0,
+                    old_el=0.0,
+                    new_az=new_az,
+                    new_el=new_el,
+                    source_deltas_csv=source_deltas_label,
+                )
+
+    # --- Build the new offsets table ---------------------------------------
     output_lines: list[str] = []
     emitted: set[str] = set()
 
@@ -201,6 +282,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--offsets", required=True, help="Base offsets text file")
     parser.add_argument("--deltas", required=True, help="Delta CSV file from measure_mixer_crosscorr")
     parser.add_argument("--output", required=True, help="Output offsets file")
+    parser.add_argument(
+        "--history-csv",
+        default="Perso/offset_history_log.csv",
+        help="Path to the offset-change tracking CSV (default: Perso/offset_history_log.csv)",
+    )
     return parser
 
 
@@ -210,11 +296,22 @@ def main() -> None:
     deltas_path = Path(args.deltas).resolve()
     output_path = Path(args.output).resolve()
 
+    # Resolve history CSV path relative to the repo root
+    _utils_dir = Path(__file__).resolve().parent
+    history_csv = (_utils_dir.parent / args.history_csv).resolve()
+    history_csv.parent.mkdir(parents=True, exist_ok=True)
+
     deltas = read_deltas(deltas_path)
-    output_text = apply_deltas_to_offsets(offsets_path, deltas)
+    output_text = apply_deltas_to_offsets(
+        offsets_path,
+        deltas,
+        history_csv=history_csv,
+        source_deltas_label=deltas_path.name,
+    )
     output_path.write_text(output_text, encoding="utf-8")
 
     print(f"Wrote adjusted offsets file: {output_path}")
+    print(f"Offset change history appended to: {history_csv}")
 
 
 if __name__ == "__main__":
