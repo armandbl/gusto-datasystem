@@ -314,8 +314,7 @@ def save_moment0_products(
 
     When ``dx_pix`` / ``dy_pix`` are provided, the PNG includes:
     - A dashed crosshair at the image centre (reference point)
-    - A red cross marking the measured correlation-peak position
-    - An annotation box with the pixel offsets
+    - A red X marking the measured correlation-peak position
     """
     moment0 = build_moment0_map(cube)
     out_header = moment0_header(header)
@@ -344,19 +343,7 @@ def save_moment0_products(
         if peak_y is None:
             peak_y = cy + dy_pix
 
-        ax.plot(peak_x, peak_y, "r+", markersize=16, markeredgewidth=2.5,
-                label=f"Offset: ({dx_pix:+.1f}, {dy_pix:+.1f}) pix")
-        ax.annotate(
-            f"({dx_pix:+.1f}, {dy_pix:+.1f}) pix",
-            xy=(peak_x, peak_y),
-            xytext=(10, 10),
-            textcoords="offset points",
-            color="red",
-            fontsize=10,
-            fontweight="bold",
-            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.85),
-        )
-        ax.legend(loc="lower right", fontsize=8, framealpha=0.85)
+        ax.plot(peak_x, peak_y, "rx", markersize=16, markeredgewidth=2.5)
 
     fig.tight_layout()
     fig.savefig(str(png_path))
@@ -373,7 +360,15 @@ def prep_map(image: np.ndarray) -> np.ndarray:
     return out
 
 
-def measure_shift_integer(reference_map: np.ndarray, target_map: np.ndarray) -> tuple[int, int, np.ndarray]:
+def measure_shift_integer(
+    reference_map: np.ndarray, target_map: np.ndarray,
+) -> tuple[int, int, float, np.ndarray]:
+    """Cross-correlate two moment-0 maps via FFT convolution.
+
+    Returns ``(lag_x, lag_y, peak_value, corr)`` where *lag_?* are the
+    integer pixel lags of the correlation peak relative to centre and
+    *peak_value* is the maximum correlation coefficient.
+    """
     ref = prep_map(reference_map)
     tgt = prep_map(target_map)
     corr = fftconvolve(ref, tgt[::-1, ::-1], mode="full")
@@ -381,7 +376,7 @@ def measure_shift_integer(reference_map: np.ndarray, target_map: np.ndarray) -> 
     center_y, center_x = (s // 2 for s in corr.shape)
     lag_y = int(peak_y - center_y)
     lag_x = int(peak_x - center_x)
-    return lag_x, lag_y, corr
+    return lag_x, lag_y, float(corr[peak_y, peak_x]), corr
 
 
 def header_float(header: fits.Header, key: str, default: float = 0.0) -> float:
@@ -417,28 +412,11 @@ def save_correlation_png(
         peak_x = int(peak_x)
         peak_y = int(peak_y)
 
-    # Build annotation lines
-    center_y, center_x = (s // 2 for s in corr.shape)
-    annot_lines = [f"Peak: ({peak_x}, {peak_y})"]
-    if dx_pix is not None and dy_pix is not None:
-        annot_lines.append(f"Pixel shift: ({dx_pix:+.1f}, {dy_pix:+.1f}) pix")
-    if dlon_deg is not None and dlat_deg is not None:
-        annot_lines.append(
-            f"Galactic: ({dlon_deg:+.4f}°, {dlat_deg:+.4f}°)"
-        )
-    annot_text = "\n".join(annot_lines)
+    ax.plot(peak_x, peak_y, "rx", markersize=14, markeredgewidth=2.5)
 
-    ax.plot(peak_x, peak_y, "r+", markersize=14, markeredgewidth=2.5)
-    ax.annotate(
-        annot_text,
-        xy=(peak_x, peak_y),
-        xytext=(10, 10),
-        textcoords="offset points",
-        color="red",
-        fontsize=9,
-        fontweight="bold",
-        bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8),
-    )
+    cy_c, cx_c = (s // 2 for s in corr.shape)
+    ax.set_xlim(cx_c - 75, cx_c + 75)
+    ax.set_ylim(cy_c - 75, cy_c + 75)
 
     fig.tight_layout()
     fig.savefig(str(out_path))
@@ -577,7 +555,7 @@ def process_job(data_root: Path, job: Job, config: dict[str, object]) -> JobResu
     map_ref = build_moment0_map(ref_cube)
     map_tgt = build_moment0_map(tgt_cube)
 
-    lag_x, lag_y, corr = measure_shift_integer(map_ref, map_tgt)
+    lag_x, lag_y, peak_val, corr = measure_shift_integer(map_ref, map_tgt)
     dx_pix = -float(lag_x)
     dy_pix = -float(lag_y)
 
@@ -616,6 +594,12 @@ def process_job(data_root: Path, job: Job, config: dict[str, object]) -> JobResu
             f"Set 'auto_detect_observer': true or add an 'observer' section "
             f"to the config for physically correct AZ/EL offsets."
         )
+
+    # Compute Galactic degree offsets from pixel offsets
+    cdelt1 = header_float(ref_header, "CDELT1", 0.0)
+    cdelt2 = header_float(ref_header, "CDELT2", 0.0)
+    dlon_deg = dx_pix * cdelt1
+    dlat_deg = dy_pix * cdelt2
 
     corr_png = compare_dir / f"crosscorr_{job.source}_{job.line}_M{job.target_mixer}_vs_M{job.mixer}.png"
     save_correlation_png(

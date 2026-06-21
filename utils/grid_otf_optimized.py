@@ -25,10 +25,112 @@ import numpy as np
 import numpy.ma as ma
 import sys
 import scipy.special
+import multiprocessing as _mp
+
+# Module-level context for parallel workers (set before Pool.map).
+# Workers read this to access large arrays without pickling overhead.
+# Requires fork start-method (default on Linux).
+_GRID_CTX = None
+
+
+def _grid_chunk_worker_chan(chan_range):
+    """
+    Process all spectra for a channel subset [chan_start, chan_end).
+
+    Channel-based splitting: each worker processes ALL spectra but only
+    a subset of velocity channels.  This keeps per-worker memory at
+    (nchan/n_jobs) * nx * ny instead of the full cube, enabling near-linear
+    scaling with core count.
+
+    Returns (local_data_cube, local_weight_cube, chan_start).
+    """
+    chan_start, chan_end = chan_range
+    ctx = _GRID_CTX
+
+    data_work       = ctx['data_work']       # (nspec, nchan)
+    x_pix           = ctx['x_pix']
+    y_pix           = ctx['y_pix']
+    weight          = ctx['weight']
+    spec_weight     = ctx['spec_weight']     # (nspec, nchan)
+    pix_scale       = ctx['pix_scale']
+    r_support_pix   = ctx['r_support_pix']
+    r_support_pix_sqrd = ctx['r_support_pix_sqrd']
+    pre_conv_fn     = ctx['pre_conv_fn']
+    pre_conv_fn_len = ctx['pre_conv_fn_len']
+    pre_delta_sqrd  = ctx['pre_delta_sqrd']
+    max_conv_fn     = ctx['max_conv_fn']
+    cap_idx         = ctx['cap_idx']
+    nx              = ctx['nx']
+    ny              = ctx['ny']
+
+    nspec = data_work.shape[0]
+    nchan_chunk = chan_end - chan_start
+    chunk_shape = (nchan_chunk, ny, nx)
+
+    local_data   = np.zeros(chunk_shape, dtype=np.float32)
+    local_weight = np.zeros(chunk_shape, dtype=np.float32)
+
+    for s in range(nspec):
+        xs = float(x_pix[s])
+        ys = float(y_pix[s])
+        ws = weight[s]
+        if ws <= 0.0:
+            continue
+
+        # Bounding box of support in pixel space
+        i_lo = max(0,  int(math.floor(xs - r_support_pix)))
+        i_hi = min(nx, int(math.ceil( xs + r_support_pix)) + 1)
+        j_lo = max(0,  int(math.floor(ys - r_support_pix)))
+        j_hi = min(ny, int(math.ceil( ys + r_support_pix)) + 1)
+
+        if i_lo >= i_hi or j_lo >= j_hi:
+            continue
+
+        # Pixel coordinate arrays for this bounding box
+        ii = np.arange(i_lo, i_hi, dtype=np.float32)
+        jj = np.arange(j_lo, j_hi, dtype=np.float32)
+
+        # Squared pixel distances:  shape (nj, ni)
+        dist2 = (ii[np.newaxis, :] - xs) ** 2 + (jj[:, np.newaxis] - ys) ** 2
+
+        # Mask pixels inside support circle
+        inside = dist2 <= r_support_pix_sqrd
+        if not inside.any():
+            continue
+
+        # Compute convolution weight for each pixel inside support
+        pix_delta_sqrd = pre_delta_sqrd / (pix_scale ** 2)
+        raw_idx = (dist2[inside] / pix_delta_sqrd).astype(np.int32)
+        raw_idx = np.clip(raw_idx, 0, pre_conv_fn_len - 1)
+
+        conv_vals = pre_conv_fn[raw_idx]
+        conv_vals[raw_idx < cap_idx] = max_conv_fn
+
+        cw = conv_vals * ws
+
+        # Flat indices of pixels inside the bounding box that are inside support
+        jj_idx, ii_idx = np.where(inside)
+        j_abs = jj_idx + j_lo
+        i_abs = ii_idx + i_lo
+
+        # Slice to this worker's channel range (key difference from spectrum
+        # splitting — each worker only touches its own channel subset)
+        cw2d    = cw[:, np.newaxis]
+        sw_row  = spec_weight[s][np.newaxis, chan_start:chan_end]
+        d_row   = data_work[s][np.newaxis, chan_start:chan_end]
+
+        wt_contrib   = cw2d * sw_row
+        data_contrib = cw2d * sw_row * d_row
+
+        np.add.at(local_weight, (slice(None), j_abs, i_abs), wt_contrib.T)
+        np.add.at(local_data,   (slice(None), j_abs, i_abs), data_contrib.T)
+
+    return (local_data, local_weight, chan_start)
 
 
 def grid_otf(data, xsky, ysky, wcsObj, nchan, xsize, ysize, pix_scale, beam_fwhm,
-             weight=None, kern="gaussbessel", gauss_fwhm=None, verbose=4):
+             weight=None, kern="gaussbessel", gauss_fwhm=None, verbose=4,
+             n_jobs=1):
     """
     Grid individual spectra onto a specified regular grid following the
     recommendations of Mangum et al. (2007).  Written to be of general use
@@ -241,78 +343,135 @@ def grid_otf(data, xsky, ysky, wcsObj, nchan, xsize, ysize, pix_scale, beam_fwhm
     if verbose > 3:
         print("Gridding %d spectra ..." % nspec)
 
-    for s in range(nspec):
-        if verbose > 3 and nspec > 1:
-            sys.stdout.write("\rSpectrum %d / %d" % (s + 1, nspec))
-            sys.stdout.flush()
+    # Determine number of parallel workers.
+    # Channel-based splitting: each worker processes all spectra for a subset
+    # of channels.  We cap at 16 workers and require ≥4 channels/worker to
+    # keep the duplicated spatial-kernel overhead small relative to the
+    # per-channel work that actually benefits from parallelism.
+    _n_jobs = n_jobs if n_jobs > 1 else 1
+    if _n_jobs > 1:
+        _max_by_chan = max(1, nchan_data // 4)  # at least 4 channels/worker
+        _n_jobs = min(_n_jobs, _max_by_chan, 16)
+        if _n_jobs != n_jobs and verbose > 2:
+            print("  capping workers at %d (nchan=%d)" %
+                  (_n_jobs, nchan_data))
 
-        xs = float(x_pix[s])
-        ys = float(y_pix[s])
-        ws = weight[s]
-        if ws <= 0.0:
-            continue
+    if _n_jobs > 1:
+        # ---------- Parallel gridding (channel-based) ----------
+        global _GRID_CTX
+        _GRID_CTX = {
+            'data_work': data_work,
+            'x_pix': x_pix,
+            'y_pix': y_pix,
+            'weight': weight,
+            'spec_weight': spec_weight,
+            'pix_scale': pix_scale,
+            'r_support_pix': r_support_pix,
+            'r_support_pix_sqrd': r_support_pix_sqrd,
+            'pre_conv_fn': pre_conv_fn,
+            'pre_conv_fn_len': pre_conv_fn_len,
+            'pre_delta_sqrd': pre_delta_sqrd,
+            'max_conv_fn': max_conv_fn,
+            'cap_idx': cap_idx,
+            'nx': nx,
+            'ny': ny,
+        }
 
-        # Bounding box of support in pixel space
-        i_lo = max(0,  int(math.floor(xs - r_support_pix)))
-        i_hi = min(nx, int(math.ceil( xs + r_support_pix)) + 1)
-        j_lo = max(0,  int(math.floor(ys - r_support_pix)))
-        j_hi = min(ny, int(math.ceil( ys + r_support_pix)) + 1)
+        # Split channel range into roughly equal chunks
+        chunk_size = int(math.ceil(nchan_data / _n_jobs))
+        chunks = [(i, min(i + chunk_size, nchan_data))
+                  for i in range(0, nchan_data, chunk_size)]
 
-        if i_lo >= i_hi or j_lo >= j_hi:
-            continue
+        if verbose > 3:
+            _mb = nchan_data * nx * ny * 8 / (1024 * 1024) / _n_jobs
+            print("  using %d workers, %d chans/worker (%.0f MB/worker)" %
+                  (_n_jobs, chunk_size, _mb))
 
-        # Pixel coordinate arrays for this bounding box
-        ii = np.arange(i_lo, i_hi, dtype=np.float32)   # (ni,)
-        jj = np.arange(j_lo, j_hi, dtype=np.float32)   # (nj,)
+        with _mp.Pool(_n_jobs) as pool:
+            results = pool.map(_grid_chunk_worker_chan, chunks)
 
-        # Squared pixel distances:  shape (nj, ni)
-        dist2 = (ii[np.newaxis, :] - xs) ** 2 + (jj[:, np.newaxis] - ys) ** 2
+        # Assemble: pool.map preserves order, results are already in channel
+        # order, so concatenate along the channel axis (axis 0).
+        data_cube   = np.concatenate([r[0] for r in results], axis=0)
+        weight_cube = np.concatenate([r[1] for r in results], axis=0)
 
-        # Mask pixels inside support circle
-        inside = dist2 <= r_support_pix_sqrd
-        if not inside.any():
-            continue
+        _GRID_CTX = None
+        if verbose > 3:
+            print('')
+    else:
+        # ---------- Serial gridding (original path) ----------
+        for s in range(nspec):
+            if verbose > 3 and nspec > 1:
+                sys.stdout.write("\rSpectrum %d / %d" % (s + 1, nspec))
+                sys.stdout.flush()
 
-        # Compute convolution weight for each pixel inside support
-        # index into pre_conv_fn: idx = dist2 / (pre_delta_sqrd / pix_scale^2)
-        pix_delta_sqrd = pre_delta_sqrd / (pix_scale ** 2)
-        raw_idx = (dist2[inside] / pix_delta_sqrd).astype(np.int32)
-        raw_idx = np.clip(raw_idx, 0, pre_conv_fn_len - 1)
+            xs = float(x_pix[s])
+            ys = float(y_pix[s])
+            ws = weight[s]
+            if ws <= 0.0:
+                continue
 
-        conv_vals = pre_conv_fn[raw_idx]                 # (n_inside,)
-        # Cap very close pixels
-        conv_vals[raw_idx < cap_idx] = max_conv_fn
+            # Bounding box of support in pixel space
+            i_lo = max(0,  int(math.floor(xs - r_support_pix)))
+            i_hi = min(nx, int(math.ceil( xs + r_support_pix)) + 1)
+            j_lo = max(0,  int(math.floor(ys - r_support_pix)))
+            j_hi = min(ny, int(math.ceil( ys + r_support_pix)) + 1)
 
-        # Combined weight: conv * per-spectrum weight scalar
-        cw = conv_vals * ws                               # (n_inside,)
+            if i_lo >= i_hi or j_lo >= j_hi:
+                continue
 
-        # Flat indices of pixels inside the bounding box that are inside support
-        jj_idx, ii_idx = np.where(inside)
-        j_abs = jj_idx + j_lo
-        i_abs = ii_idx + i_lo
+            # Pixel coordinate arrays for this bounding box
+            ii = np.arange(i_lo, i_hi, dtype=np.float32)   # (ni,)
+            jj = np.arange(j_lo, j_hi, dtype=np.float32)   # (nj,)
 
-        # For each inside pixel accumulate contribution across all channels
-        # data_work[s]: (nchan,), spec_weight[s]: (nchan,)
-        # cw[k] is the spatial weight for pixel k
-        # We add cw[k] * data_work[s] * spec_weight[s] to data_cube[:,j,i]
-        # and    cw[k] * spec_weight[s]              to weight_cube[:,j,i]
-        #
-        # Vectorised: reshape cw to (n_inside, 1), broadcast with (1, nchan)
-        cw2d    = cw[:, np.newaxis]                       # (n_inside, 1)
-        sw_row  = spec_weight[s][np.newaxis, :]           # (1, nchan)
-        d_row   = data_work[s][np.newaxis, :]             # (1, nchan)
+            # Squared pixel distances:  shape (nj, ni)
+            dist2 = (ii[np.newaxis, :] - xs) ** 2 + (jj[:, np.newaxis] - ys) ** 2
 
-        wt_contrib   = cw2d * sw_row                      # (n_inside, nchan)
-        data_contrib = cw2d * sw_row * d_row              # (n_inside, nchan)
+            # Mask pixels inside support circle
+            inside = dist2 <= r_support_pix_sqrd
+            if not inside.any():
+                continue
 
-        # Scatter-add into output arrays
-        np.add.at(weight_cube, (slice(None), j_abs, i_abs),
-                  wt_contrib.T)
-        np.add.at(data_cube,   (slice(None), j_abs, i_abs),
-                  data_contrib.T)
+            # Compute convolution weight for each pixel inside support
+            # index into pre_conv_fn: idx = dist2 / (pre_delta_sqrd / pix_scale^2)
+            pix_delta_sqrd = pre_delta_sqrd / (pix_scale ** 2)
+            raw_idx = (dist2[inside] / pix_delta_sqrd).astype(np.int32)
+            raw_idx = np.clip(raw_idx, 0, pre_conv_fn_len - 1)
 
-    if verbose > 3:
-        print('')
+            conv_vals = pre_conv_fn[raw_idx]                 # (n_inside,)
+            # Cap very close pixels
+            conv_vals[raw_idx < cap_idx] = max_conv_fn
+
+            # Combined weight: conv * per-spectrum weight scalar
+            cw = conv_vals * ws                               # (n_inside,)
+
+            # Flat indices of pixels inside the bounding box that are inside support
+            jj_idx, ii_idx = np.where(inside)
+            j_abs = jj_idx + j_lo
+            i_abs = ii_idx + i_lo
+
+            # For each inside pixel accumulate contribution across all channels
+            # data_work[s]: (nchan,), spec_weight[s]: (nchan,)
+            # cw[k] is the spatial weight for pixel k
+            # We add cw[k] * data_work[s] * spec_weight[s] to data_cube[:,j,i]
+            # and    cw[k] * spec_weight[s]              to weight_cube[:,j,i]
+            #
+            # Vectorised: reshape cw to (n_inside, 1), broadcast with (1, nchan)
+            cw2d    = cw[:, np.newaxis]                       # (n_inside, 1)
+            sw_row  = spec_weight[s][np.newaxis, :]           # (1, nchan)
+            d_row   = data_work[s][np.newaxis, :]             # (1, nchan)
+
+            wt_contrib   = cw2d * sw_row                      # (n_inside, nchan)
+            data_contrib = cw2d * sw_row * d_row              # (n_inside, nchan)
+
+            # Scatter-add into output arrays
+            np.add.at(weight_cube, (slice(None), j_abs, i_abs),
+                      wt_contrib.T)
+            np.add.at(data_cube,   (slice(None), j_abs, i_abs),
+                      data_contrib.T)
+
+        if verbose > 3:
+            print('')
 
     # ------------------------------------------------------------------ #
     # Normalise: data / weight                                             #

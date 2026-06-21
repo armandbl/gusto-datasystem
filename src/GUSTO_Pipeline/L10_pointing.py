@@ -254,7 +254,7 @@ def getMixerOffsets(band, mixers, offsetfile=None, verbose=False, args=None):
             raise ValueError(f'No mixer offsets found for {cmixer} in {offsetfile}')
 
         selected_offset = None
-        for offset_type in ('DELTA_APPLIED', 'AS_MEASURED', 'FIDUCIAL', 'THEORY'):
+        for offset_type in ('AS_MEASURED', 'FIDUCIAL', 'THEORY'):
             offset_matches = np.argwhere(cmixer_mask & (data['type'] == offset_type)).flatten()
             if offset_matches.size > 0:
                 selected_offset = int(offset_matches[-1])

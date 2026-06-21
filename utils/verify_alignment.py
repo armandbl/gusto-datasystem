@@ -103,7 +103,7 @@ def compute_offset_metrics(
     map_ref = build_moment0_map(ref)
     map_tgt = build_moment0_map(tgt)
 
-    lag_x, lag_y, corr = measure_shift_integer(map_ref, map_tgt)
+    lag_x, lag_y, peak_val, corr = measure_shift_integer(map_ref, map_tgt)
     dx_pix = -float(lag_x)
     dy_pix = -float(lag_y)
 

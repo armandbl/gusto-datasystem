@@ -5,10 +5,10 @@ For a given source and set of mixer pairs, measures cross-correlation
 shifts on the cubes in a run directory and generates:
 
 1. **Annotated cross-correlation maps** — PNG + FITS showing the full 2-D
-   correlation surface with zero-lag centre ("C") and correlation peak ("P")
+   correlation surface with centre crosshair and correlation peak (red X)
    marked, plus an offset arrow and info box with pixel/angular shifts.
-2. **Before/after comparison figures** — when ``--compare-with`` is passed,
-   a 2-panel figure per mixer pair is saved.
+2. **Before/after comparison figure** — when ``--compare-with`` is passed,
+   a 2×N grid (BEFORE row / AFTER row, one column per mixer pair) is saved.
 
 Usage
 -----
@@ -35,13 +35,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, cast
 
-# Ensure utils/ is importable regardless of CWD (needed for viz_helpers)
+# Ensure utils/ is importable regardless of CWD
 _script_dir = Path(__file__).resolve().parent
 if str(_script_dir) not in sys.path:
     sys.path.insert(0, str(_script_dir))
@@ -51,11 +49,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from astropy import units as u
-from astropy.coordinates import AltAz, EarthLocation, SkyCoord
 from astropy.io import fits
-from astropy.time import Time
-from scipy.signal import fftconvolve
 
 from viz_helpers import find_latest_run_dir  # canonical implementation
 
@@ -69,217 +63,21 @@ DEFAULT_LINE_TARGETS: dict[str, dict[str, object]] = {
 }
 
 # ---------------------------------------------------------------------------
-# File / data helpers (mirrored from measure_mixer_crosscorr)
+# Shared helpers — imported from measure_mixer_crosscorr instead of duplicated
 # ---------------------------------------------------------------------------
 
-
-def header_float(header: fits.Header, key: str, default: float = 0.0) -> float:
-    value = header.get(key, default)
-    try:
-        return float(cast(Any, value))
-    except (TypeError, ValueError):
-        return float(default)
-
-
-def parse_line_and_mixer_from_name(file_path: Path) -> tuple[str | None, int | None]:
-    tokens = file_path.stem.split("_")
-    for i, tok in enumerate(tokens):
-        up = tok.upper()
-        if up in {"CII", "NII"} and i + 1 < len(tokens):
-            nxt = tokens[i + 1]
-            if nxt.isdigit():
-                return up, int(nxt)
-    name = file_path.name.upper()
-    line = None
-    if "_CII_" in name:
-        line = "CII"
-    elif "_NII_" in name:
-        line = "NII"
-    m = re.search(r"_(\d+)(?:_|\.FITS$)", name)
-    mixer = int(m.group(1)) if m else None
-    return line, mixer
-
-
-def select_cube(run_dir: Path, line: str, mixer: int) -> Path:
-    line = line.upper()
-    candidates: list[Path] = []
-    for file_path in sorted(run_dir.glob("*.fits")):
-        p_line, p_mixer = parse_line_and_mixer_from_name(file_path)
-        if p_line == line and p_mixer == mixer:
-            candidates.append(file_path)
-    if not candidates:
-        raise FileNotFoundError(
-            f"No cube found in {run_dir} for line={line} mixer={mixer}"
-        )
-    if len(candidates) == 1:
-        return candidates[0]
-    if mixer == 8:
-        refs = [p for p in candidates if "reference" in p.name.lower()]
-        if refs:
-            return sorted(refs)[-1]
-    else:
-        matched = [p for p in candidates if "matched" in p.name.lower()]
-        if matched:
-            return sorted(matched)[-1]
-    return sorted(candidates, key=lambda p: len(p.name))[0]
-
-
-def load_cube(path: Path, ext: int = 0) -> tuple[np.ndarray, fits.Header]:
-    with fits.open(path) as hdul:
-        primary = hdul[ext]
-        data = np.squeeze(cast(Any, primary).data)
-        header = cast(fits.Header, cast(Any, primary).header)
-    if data.ndim != 3:
-        raise ValueError(f"Expected 3D cube in {path}, got shape={data.shape}")
-    return np.array(data, dtype=float), header
-
-
-def build_moment0_map(cube: np.ndarray) -> np.ndarray:
-    return np.nansum(cube, axis=0)
-
-
-# ---------------------------------------------------------------------------
-# Cross-correlation
-# ---------------------------------------------------------------------------
-
-
-def prep_map(image: np.ndarray) -> np.ndarray:
-    out = np.array(image, dtype=float)
-    median = np.nanmedian(out)
-    if np.isfinite(median):
-        out = out - median
-    out[~np.isfinite(out)] = 0.0
-    return out
-
-
-def measure_shift_integer(
-    reference_map: np.ndarray, target_map: np.ndarray
-) -> tuple[int, int, float, np.ndarray]:
-    """Cross-correlate two moment-0 maps.
-
-    Returns
-    -------
-    lag_x, lag_y : int
-        Integer pixel lags (peak relative to centre).
-    peak_value : float
-        Maximum correlation value.
-    corr : np.ndarray
-        Full 2-D correlation surface.
-    """
-    ref = prep_map(reference_map)
-    tgt = prep_map(target_map)
-    corr = fftconvolve(ref, tgt[::-1, ::-1], mode="full")
-    peak_y, peak_x = np.unravel_index(np.argmax(corr), corr.shape)
-    center_y, center_x = (s // 2 for s in corr.shape)
-    lag_x = int(peak_x - center_x)
-    lag_y = int(peak_y - center_y)
-    return lag_x, lag_y, float(corr[peak_y, peak_x]), corr
-
-
-# ---------------------------------------------------------------------------
-# Observer metadata / coordinate conversion
-# ---------------------------------------------------------------------------
-
-
-def galactic_offset_to_azel(
-    observer_lat: float,
-    observer_lon: float,
-    observer_alt: float,
-    obs_time_utc: str,
-    ref_glon: float,
-    ref_glat: float,
-    dlon_deg: float,
-    dlat_deg: float,
-) -> tuple[float, float]:
-    location = EarthLocation(
-        lat=observer_lat * u.deg,
-        lon=observer_lon * u.deg,
-        height=observer_alt * u.m,
-    )
-    obstime = Time(obs_time_utc)
-    aa_frame = AltAz(location=location, obstime=obstime)
-    ref = SkyCoord(l=ref_glon * u.deg, b=ref_glat * u.deg, frame="galactic")
-    shifted = SkyCoord(
-        l=(ref_glon + dlon_deg) * u.deg,
-        b=(ref_glat + dlat_deg) * u.deg,
-        frame="galactic",
-    )
-    ref_aa = ref.transform_to(aa_frame)
-    shifted_aa = shifted.transform_to(aa_frame)
-    daz = float((shifted_aa.az - ref_aa.az).wrap_at(180 * u.deg).deg)
-    del_ = float((shifted_aa.alt - ref_aa.alt).deg)
-    return daz, del_
-
-
-def _auto_detect_from_level1(
-    data_root: Path, source: str, line: str
-) -> tuple[float, float, float, str] | None:
-    import glob as _glob
-
-    level1_dir = data_root.parent / "level1" / source
-    pattern = str(level1_dir / f"{line}_*_L10.fits")
-    l1_files = sorted(_glob.glob(pattern))
-    if not l1_files:
-        return None
-    lats, lons, alts, utimes = [], [], [], []
-    for l1_path in l1_files:
-        try:
-            with fits.open(l1_path) as hdul:
-                hdr = hdul[0].header
-                lats.append(float(hdr["GON_LAT"]))
-                lons.append(float(hdr["GON_LON"]))
-                alts.append(float(hdr["GON_ALT"]))
-                data = hdul[1].data
-                osel = data["scan_type"] == "OTF"
-                if np.any(osel):
-                    utimes.append(float(np.median(data["UNIXTIME"][osel])))
-        except Exception:
-            continue
-    if not utimes:
-        return None
-    return (
-        float(np.median(lats)),
-        float(np.median(lons)),
-        float(np.median(alts)),
-        Time(float(np.median(utimes)), format="unix").iso,
-    )
-
-
-def get_observer_metadata(
-    config: dict[str, object], data_root: Path, source: str, line: str
-) -> tuple[float, float, float, str] | None:
-    observer_cfg = config.get("observer")
-    if isinstance(observer_cfg, dict):
-        lat = observer_cfg.get("lat_deg")
-        lon = observer_cfg.get("lon_deg")
-        alt = observer_cfg.get("alt_m")
-        time = observer_cfg.get("obs_time_utc")
-        if all(v is not None for v in (lat, lon, alt, time)):
-            return (float(lat), float(lon), float(alt), str(time))
-    if config.get("auto_detect_observer", False):
-        return _auto_detect_from_level1(data_root, source, line)
-    return None
-
-
-def pixel_offset_to_azel(
-    dx_pix: float,
-    dy_pix: float,
-    ref_header: fits.Header,
-    observer: tuple[float, float, float, str] | None,
-) -> tuple[float, float, str]:
-    cdelt1 = header_float(ref_header, "CDELT1", 0.0)
-    cdelt2 = header_float(ref_header, "CDELT2", 0.0)
-    dlon_deg = dx_pix * cdelt1
-    dlat_deg = dy_pix * cdelt2
-    if observer is not None:
-        ref_glon = header_float(ref_header, "CRVAL1", 0.0)
-        ref_glat = header_float(ref_header, "CRVAL2", 0.0)
-        az_deg, el_deg = galactic_offset_to_azel(
-            observer[0], observer[1], observer[2], observer[3],
-            ref_glon, ref_glat, dlon_deg, dlat_deg,
-        )
-        return az_deg, el_deg, "astropy"
-    return dlon_deg, dlat_deg, "cdelt_fallback"
+from measure_mixer_crosscorr import (  # type: ignore[import-not-found]  # noqa: E402
+    build_moment0_map,
+    galactic_offset_to_azel,
+    get_observer_metadata,
+    header_float,
+    load_cube,
+    measure_shift_integer,
+    parse_line_and_mixer_from_name,
+    pixel_offset_to_azel,
+    prep_map,
+    select_cube,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -300,9 +98,9 @@ def _add_centre_crosshair(
 def _add_peak_marker(
     ax: plt.Axes, px: float, py: float, label: str = "Peak", **kwargs
 ) -> None:
-    """Draw a red cross at the peak position with an annotation."""
+    """Draw a red X at the peak position."""
     defaults = dict(
-        markersize=14, markeredgewidth=2.5, marker="+", color="red", zorder=10
+        markersize=14, markeredgewidth=2.5, marker="x", color="red", zorder=10
     )
     defaults.update(kwargs)
     ax.plot(px, py, **defaults)
@@ -317,7 +115,7 @@ def _add_offset_arrow(
     dx: float,
     dy: float,
 ) -> None:
-    """Draw an arrow from centre to peak, annotated with the pixel offset."""
+    """Draw an arrow from centre to peak."""
     ax.annotate(
         "",
         xy=(px, py),
@@ -330,19 +128,6 @@ def _add_offset_arrow(
             connectionstyle="arc3,rad=0",
         ),
         zorder=11,
-    )
-    # Annotate the offset value near the midpoint
-    mid_x, mid_y = (cx + px) / 2, (cy + py) / 2
-    ax.annotate(
-        f"({dx:+.1f}, {dy:+.1f}) pix",
-        xy=(mid_x, mid_y),
-        fontsize=9,
-        fontweight="bold",
-        color="red",
-        ha="center",
-        va="center",
-        bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.85),
-        zorder=12,
     )
 
 
@@ -368,8 +153,8 @@ def plot_correlation_map(
 
     Marks:
     - The zero-lag centre (white dashed crosshair)
-    - The correlation peak (red cross)
-    - An arrow from centre → peak with the pixel offset
+    - The correlation peak (red X)
+    - An arrow from centre → peak
     - Info box with peak value and converted angles
     """
     fig, ax = plt.subplots(figsize=(8, 7), dpi=150)
@@ -421,133 +206,90 @@ def plot_correlation_map(
         zorder=13,
     )
 
-    # Zoom annotation showing centre and peak in context
-    ax.annotate(
-        "C",
-        xy=(cx, cy),
-        fontsize=12,
-        fontweight="bold",
-        color="white",
-        ha="center",
-        va="center",
-        bbox=dict(boxstyle="circle,pad=0.2", facecolor="black", alpha=0.5),
-        zorder=13,
-    )
-    ax.annotate(
-        "P",
-        xy=(peak_x, peak_y),
-        fontsize=12,
-        fontweight="bold",
-        color="red",
-        ha="center",
-        va="center",
-        xytext=(8, 8),
-        textcoords="offset points",
-        bbox=dict(boxstyle="circle,pad=0.2", facecolor="white", alpha=0.85),
-        zorder=13,
-    )
+    ax.set_xlim(cx - 75, cx + 75)
+    ax.set_ylim(cy - 75, cy + 75)
 
     fig.tight_layout()
     fig.savefig(str(out_path), dpi=150)
     plt.close(fig)
 
 
-def plot_before_after_comparison(
-    corr_before: np.ndarray,
-    corr_after: np.ndarray,
-    results_before: dict[str, object],
-    results_after: dict[str, object],
+def plot_combined_before_after(
+    pairs: list[dict[str, object]],
     out_path: Path,
 ) -> None:
-    """Create a 2-panel before/after comparison figure.
+    """Create a 2×N before/after comparison figure.
 
     Layout:
-        left:   Corr map BEFORE (theory)
-        right:  Corr map AFTER  (measured)
+        rows:    BEFORE (top), AFTER (bottom)
+        columns: one per mixer pair
     """
-    source = str(results_before.get("source", ""))
-    line = str(results_before.get("line", ""))
-    ref_mixer = int(results_before.get("ref_mixer", 0))
-    tgt_mixer = int(results_before.get("tgt_mixer", 0))
+    n = len(pairs)
+    if n == 0:
+        return
 
-    fig, (ax_before, ax_after) = plt.subplots(
-        1, 2, figsize=(17, 7.5), dpi=150
-    )
+    fig, axes = plt.subplots(2, n, figsize=(8 * n, 14), dpi=150)
+    if n == 1:
+        axes = axes.reshape(2, 1)
 
-    cy_c, cx_c = (s // 2 for s in corr_before.shape)
+    for col, pair in enumerate(pairs):
+        corr_before = pair["corr_before"]
+        corr_after = pair["corr_after"]
+        res_before = pair["res_before"]
+        res_after = pair["res_after"]
+        pair_label = pair["label"]
 
-    def _plot_one(
-        ax: plt.Axes,
-        corr: np.ndarray,
-        res: dict[str, object],
-        subtitle: str,
-    ) -> None:
-        im = ax.imshow(corr, origin="lower", cmap="viridis", aspect="auto")
-        ax.set_title(
-            f"Cross-correlation  [{subtitle}]", fontsize=12, fontweight="bold"
-        )
-        ax.set_xlabel("X lag index")
-        ax.set_ylabel("Y lag index")
-        plt.colorbar(im, ax=ax, label="Correlation", shrink=0.88)
+        cy_c, cx_c = (s // 2 for s in corr_before.shape)
 
-        dx = float(res.get("dx_pix", 0))
-        dy = float(res.get("dy_pix", 0))
-        lag_x = int(res.get("lag_x", 0))
-        lag_y = int(res.get("lag_y", 0))
-        peak_y = cy_c + lag_y
-        peak_x = cx_c + lag_x
+        for row, (corr, res, subtitle) in enumerate([
+            (corr_before, res_before, "BEFORE"),
+            (corr_after, res_after, "AFTER"),
+        ]):
+            ax = axes[row, col]
+            im = ax.imshow(corr, origin="lower", cmap="viridis", aspect="auto")
+            ax.set_title(f"{pair_label}  [{subtitle}]", fontsize=11, fontweight="bold")
+            ax.set_xlabel("X lag index")
+            ax.set_ylabel("Y lag index")
+            plt.colorbar(im, ax=ax, label="Correlation", shrink=0.85)
 
-        _add_centre_crosshair(ax, cx_c, cy_c, color="white")
-        _add_peak_marker(ax, peak_x, peak_y)
-        _add_offset_arrow(ax, cx_c, cy_c, peak_x, peak_y, dx, dy)
+            dx = float(res.get("dx_pix", 0))
+            dy = float(res.get("dy_pix", 0))
+            lag_x = int(res.get("lag_x", 0))
+            lag_y = int(res.get("lag_y", 0))
+            peak_y = cy_c + lag_y
+            peak_x = cx_c + lag_x
 
-        offset_mag = np.sqrt(dx**2 + dy**2)
-        dlon = res.get("dlon_deg")
-        dlat = res.get("dlat_deg")
+            _add_centre_crosshair(ax, cx_c, cy_c, color="white")
+            _add_peak_marker(ax, peak_x, peak_y)
+            _add_offset_arrow(ax, cx_c, cy_c, peak_x, peak_y, dx, dy)
 
-        lines = [
-            f"Pixel shift: ({dx:+.1f}, {dy:+.1f}) pix",
-            f"Offset magnitude: {offset_mag:.1f} pix",
-        ]
-        if dlon is not None and dlat is not None:
-            lines.append(f"Galactic: ({float(dlon):+.4f}, {float(dlat):+.4f})°")
-        az = res.get("az_deg")
-        el = res.get("el_deg")
-        if az is not None and el is not None:
-            lines.append(f"AZ/EL: ({float(az):+.5f}, {float(el):+.5f})°")
+            offset_mag = np.sqrt(dx**2 + dy**2)
+            dlon = res.get("dlon_deg")
+            dlat = res.get("dlat_deg")
 
-        ax.text(
-            0.02, 0.98, "\n".join(lines),
-            transform=ax.transAxes, fontsize=8.5, fontfamily="monospace",
-            verticalalignment="top",
-            bbox=dict(boxstyle="round,pad=0.4", facecolor="white", alpha=0.9),
-            zorder=13,
-        )
+            info = [
+                f"({dx:+.1f}, {dy:+.1f}) pix",
+                f"|offset| = {offset_mag:.1f} pix",
+            ]
+            if dlon is not None and dlat is not None:
+                info.append(f"Gal: ({float(dlon):+.4f}, {float(dlat):+.4f})°")
+            az = res.get("az_deg")
+            el = res.get("el_deg")
+            if az is not None and el is not None:
+                info.append(f"AZ/EL: ({float(az):+.5f}, {float(el):+.5f})°")
 
-        # Centre + peak labels
-        ax.annotate(
-            "C", xy=(cx_c, cy_c),
-            fontsize=11, fontweight="bold", color="white",
-            ha="center", va="center",
-            bbox=dict(boxstyle="circle,pad=0.2", facecolor="black", alpha=0.5),
-            zorder=13,
-        )
-        ax.annotate(
-            "P", xy=(peak_x, peak_y),
-            fontsize=11, fontweight="bold", color="red",
-            ha="center", va="center",
-            xytext=(8, 8), textcoords="offset points",
-            bbox=dict(boxstyle="circle,pad=0.2", facecolor="white", alpha=0.85),
-            zorder=13,
-        )
+            ax.text(
+                0.02, 0.98, "\n".join(info),
+                transform=ax.transAxes, fontsize=8, fontfamily="monospace",
+                verticalalignment="top",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.9),
+                zorder=13,
+            )
 
-    _plot_one(ax_before, corr_before, results_before, "BEFORE (theory)")
-    _plot_one(ax_after, corr_after, results_after, "AFTER (measured)")
+            ax.set_xlim(cx_c - 75, cx_c + 75)
+            ax.set_ylim(cy_c - 75, cy_c + 75)
 
-    fig.suptitle(
-        f"{source}  {line}  M{ref_mixer} vs M{tgt_mixer} — Alignment Before/After",
-        fontsize=13, fontweight="bold", y=0.995,
-    )
+    fig.suptitle("Alignment Before / After", fontsize=14, fontweight="bold", y=0.998)
     fig.tight_layout()
     fig.savefig(str(out_path), dpi=150)
     plt.close(fig)
@@ -770,6 +512,8 @@ def generate_comparisons(
 
     after_index = {_key(r): r for r in after_results}
 
+    # Collect all matching pairs
+    pairs: list[dict[str, object]] = []
     for b_res in before_results:
         k = _key(b_res)
         a_res = after_index.get(k)
@@ -783,7 +527,6 @@ def generate_comparisons(
         tgt_m = int(b_res["tgt_mixer"])
         pair_tag = f"{source}_{line}_M{ref_m}_vs_M{tgt_m}"
 
-        # Load correlation FITS files
         corr_before_path = Path(str(b_res.get("corr_fits", "")))
         corr_after_path = Path(str(a_res.get("corr_fits", "")))
 
@@ -796,16 +539,18 @@ def generate_comparisons(
         with fits.open(corr_after_path) as hdul:
             corr_after = np.array(hdul[0].data, dtype=float)
 
-        # Generate comparison figure
-        comp_png = comparison_dir / f"comparison_{pair_tag}.png"
-        print(f"  Generating comparison: {comp_png.name}")
-        plot_before_after_comparison(
-            corr_before=corr_before,
-            corr_after=corr_after,
-            results_before=b_res,
-            results_after=a_res,
-            out_path=comp_png,
-        )
+        pairs.append({
+            "corr_before": corr_before,
+            "corr_after": corr_after,
+            "res_before": b_res,
+            "res_after": a_res,
+            "label": f"{source} {line} M{ref_m} vs M{tgt_m}",
+        })
+
+    if pairs:
+        comp_png = comparison_dir / "comparison_before_after.png"
+        print(f"  Generating combined comparison ({len(pairs)} pairs): {comp_png.name}")
+        plot_combined_before_after(pairs, comp_png)
 
     print(f"Comparison figures saved to: {comparison_dir}")
 

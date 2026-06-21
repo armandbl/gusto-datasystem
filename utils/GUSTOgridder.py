@@ -33,7 +33,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from GUSTO_Pipeline.DataIO import loadSDFITS 
-from multiprocessing import Process, Queue
+from multiprocessing import cpu_count
 from GUSTO_Pipeline.flagdefs import *
 
 import datetime
@@ -442,6 +442,13 @@ def main(args=None,verbose=True):
                        action='store_true',
                        required=False,
                        help='Disable automatic divide-by-1000 rescale when cube intensities are very large.')
+        my_parser.add_argument('-j',
+                               metavar='--cpus',
+                               type=int,
+                               required=False,
+                               default=None,
+                               help='Number of CPUs for parallel gridding '
+                                    '(default: all available cores)')
 
 
         args = my_parser.parse_args()
@@ -465,7 +472,10 @@ def main(args=None,verbose=True):
     dir_level1 = str(datadir / 'level1' / source)
     dir_write = str(datadir / 'level2' / source)
     os.makedirs(dir_write, exist_ok=True)
-    
+
+    # Number of parallel workers for gridding
+    n_jobs = args.j if args.j is not None else cpu_count()
+
     dvNII = 2.0076146439883598  # band 1 native resolution
     dvCII = 0.7709722465531635  # band 2 native resolution
     # velocity steps
@@ -552,7 +562,7 @@ def main(args=None,verbose=True):
         hdr, wcsObj, xsize, ysize = create_wcsheader(xpos_in,ypos_in,restfreq,vv_in,coordType,pix_scale,beam_fwhm_in)
     #
     # create spectral map 
-    cube, weight, beam_size = grid_otf(arr_line_in, xpos_in, ypos_in, wcsObj, nchan_in, xsize, ysize, pix_scale, beam_fwhm_in, weight=weight ,kern = kern)
+    cube, weight, beam_size = grid_otf(arr_line_in, xpos_in, ypos_in, wcsObj, nchan_in, xsize, ysize, pix_scale, beam_fwhm_in, weight=weight ,kern = kern, n_jobs=n_jobs)
     #cube, weight, beam_size = grid_otf(arr_line_in, xpos_in, ypos_in, wcsObj, nchan_in, xsize, ysize, pix_scale, beam_fwhm_in, kern = kern)
     #
     #

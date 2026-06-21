@@ -34,6 +34,10 @@ def main() -> None:
     parser.add_argument("--vmax", type=float, default=0.0, help="Maximum velocity for -l")
     parser.add_argument("--beam", type=float, default=1.0, help="Beam FWHM in arcmin for -Beam")
     parser.add_argument(
+        "-j", "--cpus", type=int, default=None,
+        help="Number of CPU workers for the gridding kernel (passed to GUSTOgridder -j)",
+    )
+    parser.add_argument(
         "--python",
         default=None,
         help="Python executable to use. Defaults to current interpreter.",
@@ -68,6 +72,8 @@ def main() -> None:
         "-Beam",
         str(args.beam),
     ]
+    if args.cpus is not None:
+        base_args.extend(["-j", str(args.cpus)])
 
     first_cmd = [
         py_exe,

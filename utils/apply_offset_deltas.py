@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply summed delta offsets to a calibration table without AS_MEASURED rows."""
+"""Apply summed delta offsets to a calibration table, writing AS_MEASURED rows."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
-# Offset history tracking  (keeps a running log of every DELTA_APPLIED update)
+# Offset history tracking  (keeps a running log of every AS_MEASURED update)
 # ---------------------------------------------------------------------------
 
 TRACKING_FIELDS = [
@@ -77,8 +77,8 @@ def read_deltas(path: Path) -> dict[str, tuple[float, float]]:
 
 
 # Priority order matching getMixerOffsets() in L10_pointing.py.
-# DELTA_APPLIED > AS_MEASURED > FIDUCIAL > THEORY
-_OFFSET_TYPE_PRIORITY = ("DELTA_APPLIED", "AS_MEASURED", "FIDUCIAL", "THEORY")
+# AS_MEASURED > FIDUCIAL > THEORY
+_OFFSET_TYPE_PRIORITY = ("AS_MEASURED", "FIDUCIAL", "THEORY")
 
 # Band → anchor mixer (hardcoded to match the zero-referencing anchors in
 # L10_pointing.py:getMixerOffsets).  Band 1 = NII, Band 2 = CII.
@@ -138,24 +138,26 @@ def apply_deltas_to_offsets(
     history_csv: Path | None = None,
     source_deltas_label: str = "",
 ) -> str:
-    """Build a new offsets table with ``DELTA_APPLIED`` entries.
+    """Build a new offsets table with ``AS_MEASURED`` entries.
 
     **Critical convention**:
 
-    The cross-correlation measures the *apparent* emission shift between
-    mixer cubes, which is opposite in sign to the physical mixer offset
-    that L10 expects.  Therefore we NEGATE the measurement::
+    The cross-correlation measures the RESIDUAL emission shift after
+    current offsets are applied.  The new absolute offset is the old
+    offset plus the residual::
 
-        azoff = anchor_absolute − daz_measured
+        new_az = old_target_az + daz
 
-    Verified against THEORY::
-        B2M5 THEORY = +0.031° (RIGHT)
-        cross-corr daz = −0.031° (LEFT)
-        stored = anchor − daz = 0 − (−0.031) = +0.031°  ✓
+    This works for both first measurement (old = THEORY) and iterative
+    updates (old = previous AS_MEASURED).
+
+    After L10 zero-referencing the correction adjusts by exactly daz::
+
+        effective_new = (old + daz) − anchor = effective_old + daz
 
     The function also:
-    * Strips old ``AS_MEASURED`` and ``DELTA_APPLIED`` lines.
-    * Inserts a single ``DELTA_APPLIED`` line after the corresponding
+    * Strips old ``AS_MEASURED`` lines.
+    * Inserts a single ``AS_MEASURED`` line after the corresponding
       ``THEORY`` / ``FIDUCIAL`` baseline.
     """
     lines = offsets_file.read_text(encoding="utf-8").splitlines()
@@ -164,24 +166,15 @@ def apply_deltas_to_offsets(
     # The cross-correlation measures the pixel shift between mixer cubes
     # and converts it to AZ/EL via galactic_offset_to_azel().
     #
-    # EMPIRICAL FINDING (2026-06-08): the cross-correlation output has
-    # the OPPOSITE sign convention from what L10 expects.
+    # CONVENTION (verified 2026-06-05, corrected 2026-06-21):
+    #   The cross-corr measures the RESIDUAL emission shift.
+    #   New absolute offset = old target offset + residual.
+    #   Works for both first measurement (old = THEORY) and
+    #   iterative updates (old = previous AS_MEASURED).
     #
-    #   L10 applies:  naz = az + azoff
-    #   (positive azoff → mixer looks at HIGHER AZ = RIGHT)
-    #
-    #   Cross-corr measures: daz = AZ(target_emission) − AZ(ref_emission)
-    #   (daz > 0 → target emission at HIGHER AZ → target is LEFT)
-    #
-    # The cross-corr daz is the *apparent* AZ shift of the emission,
-    # which is OPPOSITE to the physical mixer offset.  A mixer that is
-    # physically RIGHT sees emission that appears shifted LEFT.
-    #
-    # Therefore we NEGATE the cross-corr measurement:
-    #   azoff = anchor − daz
-    #
-    # Verified against THEORY: B2M5 THEORY = +0.031° (RIGHT),
-    # cross-corr daz = −0.031°, stored = 0 − (−0.031) = +0.031° ✓
+    #   Formula: absolute_offset = old_target_az + daz
+    #   After L10 zero-ref: effective = (old + daz) − anchor
+    #                         = effective_old + daz
     computed: dict[str, tuple[float, float]] = {}
     for pix_label, (daz, del_) in deltas.items():
         band = _band_from_pix_label(pix_label)
@@ -196,11 +189,27 @@ def apply_deltas_to_offsets(
             )
             continue
 
-        # NEGATE the cross-corr measurement: the cross-corr measures the
-        # apparent emission shift, which is opposite to the physical
-        # mixer offset that L10 expects.
-        new_az = anchor[0] - daz   # subtract = negate the cross-corr sign
-        new_el = anchor[1] - del_
+        # The cross-correlation measures the RESIDUAL emission shift
+        # after current offsets are applied.  The new absolute offset
+        # should be the old offset PLUS the residual:
+        #
+        #   new_az = old_target_az + daz
+        #
+        # This works for both:
+        #   - First measurement (old = THEORY): adjusts from theory baseline
+        #   - Iterative updates (old = previous AS_MEASURED): accumulates
+        #
+        # After L10 zero-referencing:
+        #   effective_new = (old + daz) - anchor
+        #                 = effective_old + daz
+        #
+        # The correction moves in the same direction as daz, which
+        # counteracts the remaining beam offset.
+        old_target = current_offsets.get(pix_label)
+        if old_target is None:
+            old_target = (anchor[0], anchor[1])
+        new_az = old_target[0] + daz
+        new_el = old_target[1] + del_
         computed[pix_label] = (new_az, new_el)
 
     # --- Append offset-change history before stripping old values ----------
@@ -251,13 +260,13 @@ def apply_deltas_to_offsets(
         etype = cols[3].upper()
 
         # Drop old measured / applied rows — they will be replaced.
-        if etype in {"AS_MEASURED", "DELTA_APPLIED"}:
+        if etype == "AS_MEASURED":
             continue
 
         # Preserve THEORY / FIDUCIAL (and any other unexpected types).
         output_lines.append(line)
 
-        # Only attach a DELTA_APPLIED row to THEORY / FIDUCIAL lines,
+        # Only attach an AS_MEASURED row to THEORY / FIDUCIAL lines,
         # and only once per mixer.
         if etype not in {"THEORY", "FIDUCIAL"}:
             continue
@@ -270,7 +279,7 @@ def apply_deltas_to_offsets(
 
         new_az, new_el = entry
         output_lines.append(
-            f"{pix_label}\t{new_az:.6f}\t{new_el:.6f}\tDELTA_APPLIED"
+            f"{pix_label}\t{new_az:.6f}\t{new_el:.6f}\tAS_MEASURED"
         )
         emitted.add(pix_label)
 
