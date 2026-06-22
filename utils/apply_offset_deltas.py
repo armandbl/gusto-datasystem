@@ -8,6 +8,8 @@ import csv
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
+
 
 # ---------------------------------------------------------------------------
 # Offset history tracking  (keeps a running log of every AS_MEASURED update)
@@ -58,8 +60,12 @@ def append_offset_history(
 # Core logic
 # ---------------------------------------------------------------------------
 
-def read_deltas(path: Path) -> dict[str, tuple[float, float]]:
-    deltas: dict[str, tuple[float, float]] = {}
+def read_deltas(path: Path) -> dict[str, tuple[float, float, float, float]]:
+    """Read delta CSV, returning ``{pix_label: (daz, del_, sigma_az, sigma_el)}``.
+
+    Uncertainty columns are optional — defaults to NaN if missing.
+    """
+    deltas: dict[str, tuple[float, float, float, float]] = {}
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
@@ -72,7 +78,17 @@ def read_deltas(path: Path) -> dict[str, tuple[float, float]]:
                 az_value = row.get("sum_az_deg", 0.0)
             if el_value in (None, ""):
                 el_value = row.get("sum_el_deg", 0.0)
-            deltas[pix_label] = (float(az_value or 0.0), float(el_value or 0.0))
+
+            daz = float(az_value or 0.0)
+            del_ = float(el_value or 0.0)
+
+            # Uncertainty columns (added by measure_mixer_crosscorr uncertain branch)
+            saz = row.get("sigma_az_deg")
+            sel = row.get("sigma_el_deg")
+            sigma_az = float(saz) if saz not in (None, "") else float("nan")
+            sigma_el = float(sel) if sel not in (None, "") else float("nan")
+
+            deltas[pix_label] = (daz, del_, sigma_az, sigma_el)
     return deltas
 
 
@@ -134,7 +150,7 @@ def _get_current_effective_offsets(
 
 def apply_deltas_to_offsets(
     offsets_file: Path,
-    deltas: dict[str, tuple[float, float]],
+    deltas: dict[str, tuple[float, float, float, float]],
     history_csv: Path | None = None,
     source_deltas_label: str = "",
 ) -> str:
@@ -159,28 +175,18 @@ def apply_deltas_to_offsets(
     * Strips old ``AS_MEASURED`` lines.
     * Inserts a single ``AS_MEASURED`` line after the corresponding
       ``THEORY`` / ``FIDUCIAL`` baseline.
+    * Tracks uncertainties in the history CSV (not in the offsets file).
     """
     lines = offsets_file.read_text(encoding="utf-8").splitlines()
     current_offsets = _get_current_effective_offsets(lines)
 
-    # The cross-correlation measures the pixel shift between mixer cubes
-    # and converts it to AZ/EL via galactic_offset_to_azel().
-    #
-    # CONVENTION (verified 2026-06-05, corrected 2026-06-21):
-    #   The cross-corr measures the RESIDUAL emission shift.
-    #   New absolute offset = old target offset + residual.
-    #   Works for both first measurement (old = THEORY) and
-    #   iterative updates (old = previous AS_MEASURED).
-    #
-    #   Formula: absolute_offset = old_target_az + daz
-    #   After L10 zero-ref: effective = (old + daz) − anchor
-    #                         = effective_old + daz
+    # Compute new offsets; uncertainties are tracked in history log only
     computed: dict[str, tuple[float, float]] = {}
-    for pix_label, (daz, del_) in deltas.items():
+    computed_unc: dict[str, tuple[float, float]] = {}
+    for pix_label, (daz, del_, sigma_daz, sigma_del) in deltas.items():
         band = _band_from_pix_label(pix_label)
         anchor_label = _BAND_ANCHORS[band]
 
-        # Verify the anchor exists (needed for zero-referencing at L10).
         anchor = current_offsets.get(anchor_label)
         if anchor is None:
             print(
@@ -190,21 +196,7 @@ def apply_deltas_to_offsets(
             continue
 
         # The cross-correlation measures the RESIDUAL emission shift
-        # after current offsets are applied.  The new absolute offset
-        # should be the old offset PLUS the residual:
-        #
-        #   new_az = old_target_az + daz
-        #
-        # This works for both:
-        #   - First measurement (old = THEORY): adjusts from theory baseline
-        #   - Iterative updates (old = previous AS_MEASURED): accumulates
-        #
-        # After L10 zero-referencing:
-        #   effective_new = (old + daz) - anchor
-        #                 = effective_old + daz
-        #
-        # The correction moves in the same direction as daz, which
-        # counteracts the remaining beam offset.
+        # after current offsets are applied.
         old_target = current_offsets.get(pix_label)
         if old_target is None:
             old_target = (anchor[0], anchor[1])
@@ -212,10 +204,16 @@ def apply_deltas_to_offsets(
         new_el = old_target[1] + del_
         computed[pix_label] = (new_az, new_el)
 
-    # --- Append offset-change history before stripping old values ----------
+        # Uncertainty (tracked in history log, not offsets file)
+        dsa = sigma_daz if np.isfinite(sigma_daz) else 0.0
+        dse = sigma_del if np.isfinite(sigma_del) else 0.0
+        computed_unc[pix_label] = (dsa, dse)
+
+    # --- Append offset-change history --------------------------------------
     if history_csv is not None:
         for pix_label, (new_az, new_el) in computed.items():
             old = current_offsets.get(pix_label)
+            sa, se = computed_unc.get(pix_label, (float("nan"), float("nan")))
             if old is not None:
                 append_offset_history(
                     history_csv,
@@ -227,8 +225,6 @@ def apply_deltas_to_offsets(
                     source_deltas_csv=source_deltas_label,
                 )
             else:
-                # Mixer didn't have a prior effective offset — still record
-                # the first measurement, using 0.0 as the old baseline.
                 append_offset_history(
                     history_csv,
                     mixer=pix_label,
@@ -239,7 +235,7 @@ def apply_deltas_to_offsets(
                     source_deltas_csv=source_deltas_label,
                 )
 
-    # --- Build the new offsets table ---------------------------------------
+    # --- Build the new offsets table (4-column, no UNC) --------------------
     output_lines: list[str] = []
     emitted: set[str] = set()
 

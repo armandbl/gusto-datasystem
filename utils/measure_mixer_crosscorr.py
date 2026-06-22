@@ -61,6 +61,11 @@ class JobResult:
     coord_method: str
     status: str
     correlation_png: str
+    # Uncertainty fields (1-σ)
+    sigma_x_pix: float = float("nan")
+    sigma_y_pix: float = float("nan")
+    sigma_az_deg: float = float("nan")
+    sigma_el_deg: float = float("nan")
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +203,78 @@ def get_observer_metadata(
 # File / data helpers
 # ---------------------------------------------------------------------------
 
+def _compute_azel_to_pixel_jacobian(
+    observer: tuple[float, float, float, str],
+    ref_header: fits.Header,
+) -> np.ndarray | None:
+    """Compute the 2×2 Jacobian ∂(x_pix, y_pix)/∂(az, el) at the reference position.
+
+    Uses the L10 correction path (ICRS → AltAz → add offset → ICRS → WCS pixel)
+    to numerically compute how pixel coordinates respond to AZ/EL perturbations.
+
+    Returns the Jacobian matrix ``J`` where::
+
+        [dx_pix]   J   [daz]
+        [dy_pix] =   · [del_]
+
+    or *None* if the WCS or observer data is invalid.
+    """
+    from astropy.wcs import WCS  # local import — WCS is heavy
+
+    try:
+        w = WCS(ref_header).celestial
+    except Exception:
+        return None
+
+    ref_glon = header_float(ref_header, "CRVAL1", 0.0)
+    ref_glat = header_float(ref_header, "CRVAL2", 0.0)
+
+    location = EarthLocation(
+        lat=observer[0] * u.deg,
+        lon=observer[1] * u.deg,
+        height=observer[2] * u.m,
+    )
+    obstime = Time(observer[3])
+    aa_frame = AltAz(location=location, obstime=obstime)
+
+    # Reference position in ICRS → AltAz
+    ref_gal = SkyCoord(l=ref_glon * u.deg, b=ref_glat * u.deg, frame="galactic")
+    ref_icrs = ref_gal.transform_to("icrs")
+    ref_altaz = ref_icrs.transform_to(aa_frame)
+
+    # CRPIX for pixel reference
+    crpix1 = header_float(ref_header, "CRPIX1", 1.0)
+    crpix2 = header_float(ref_header, "CRPIX2", 1.0)
+
+    def _pixel_shift(daz: float, del_: float) -> tuple[float, float]:
+        """Apply (daz, del_) via the L10 correction path, return pixel shift."""
+        naz = ref_altaz.az + daz * u.deg
+        nalt = ref_altaz.alt + del_ * u.deg
+        corr_icrs = SkyCoord(
+            AltAz(az=naz, alt=nalt, obstime=obstime, location=location)
+        ).transform_to("icrs")
+        cx, cy = w.world_to_pixel(corr_icrs)
+        return float(cx - crpix1), float(cy - crpix2)
+
+    # Numerical differentiation with a small perturbation (≈ 1 arcsec)
+    eps = 1.0 / 3600.0  # degrees
+
+    # Column 0: ∂(pix)/∂(az)
+    x_az_p, y_az_p = _pixel_shift(+eps, 0.0)
+    x_az_m, y_az_m = _pixel_shift(-eps, 0.0)
+    j00 = (x_az_p - x_az_m) / (2 * eps)
+    j10 = (y_az_p - y_az_m) / (2 * eps)
+
+    # Column 1: ∂(pix)/∂(el)
+    x_el_p, y_el_p = _pixel_shift(0.0, +eps)
+    x_el_m, y_el_m = _pixel_shift(0.0, -eps)
+    j01 = (x_el_p - x_el_m) / (2 * eps)
+    j11 = (y_el_p - y_el_m) / (2 * eps)
+
+    J = np.array([[j00, j01], [j10, j11]], dtype=float)
+    return J
+
+
 def pixel_offset_to_azel(
     dx_pix: float,
     dy_pix: float,
@@ -206,21 +283,36 @@ def pixel_offset_to_azel(
 ) -> tuple[float, float, str]:
     """Convert a pixel offset to an AZ/EL angular offset.
 
-    Uses the CD matrix from *ref_header* to convert pixel → Galactic degrees,
-    then ``galactic_offset_to_azel`` to convert to AZ/EL using the full
-    astropy coordinate chain.
+    When observer metadata is available, computes the 2×2 Jacobian
+    ∂(pix)/∂(az, el) along the L10 correction path and solves the coupled
+    linear system to decouple AZ and EL corrections — preventing the
+    coordinate-axis cancellation that can stall convergence in one pixel
+    direction.
 
-    Returns ``(az_deg, el_deg, method)`` where *method* is ``"astropy"``
-    (correct) or ``"cdelt_fallback"`` (direct degree conversion, used when
-    no observer metadata is available).
+    Without observer metadata falls back to the direct CDELT-based
+    conversion (``dlon_deg = dx_pix × cdelt1``, etc.).
+
+    Returns ``(az_deg, el_deg, method)`` where *method* is
+    ``"jacobian"`` (decoupled, preferred), ``"astropy"`` (uncoupled
+    Galactic→AltAz conversion), or ``"cdelt_fallback"`` (no observer).
     """
-    cdelt1 = header_float(ref_header, "CDELT1", 0.0)
-    cdelt2 = header_float(ref_header, "CDELT2", 0.0)
-
-    dlon_deg = dx_pix * cdelt1
-    dlat_deg = dy_pix * cdelt2
-
     if observer is not None:
+        J = _compute_azel_to_pixel_jacobian(observer, ref_header)
+        if J is not None and abs(np.linalg.det(J)) > 1e-12:
+            # Solve: J · [daz, del_] = [-dx_pix, -dy_pix]
+            # (we want to CANCEL the measured offset)
+            target = np.array([-dx_pix, -dy_pix], dtype=float)
+            try:
+                solution = np.linalg.solve(J, target)
+                return float(solution[0]), float(solution[1]), "jacobian"
+            except np.linalg.LinAlgError:
+                pass  # fall through to uncoupled method
+
+        # Jacobian failed — fall back to uncoupled Galactic→AltAz
+        cdelt1 = header_float(ref_header, "CDELT1", 0.0)
+        cdelt2 = header_float(ref_header, "CDELT2", 0.0)
+        dlon_deg = dx_pix * cdelt1
+        dlat_deg = dy_pix * cdelt2
         ref_glon = header_float(ref_header, "CRVAL1", 0.0)
         ref_glat = header_float(ref_header, "CRVAL2", 0.0)
         az_deg, el_deg = galactic_offset_to_azel(
@@ -229,7 +321,90 @@ def pixel_offset_to_azel(
         )
         return az_deg, el_deg, "astropy"
 
+    cdelt1 = header_float(ref_header, "CDELT1", 0.0)
+    cdelt2 = header_float(ref_header, "CDELT2", 0.0)
+    dlon_deg = dx_pix * cdelt1
+    dlat_deg = dy_pix * cdelt2
     return dlon_deg, dlat_deg, "cdelt_fallback"
+
+
+def propagate_pixel_uncertainty_to_azel(
+    sigma_x_pix: float,
+    sigma_y_pix: float,
+    cov_xy_pix: float,
+    ref_header: fits.Header,
+    observer: tuple[float, float, float, str] | None,
+    coord_method: str,
+    dx_pix: float = 0.0,
+    dy_pix: float = 0.0,
+) -> tuple[float, float]:
+    """Propagate 1-σ pixel uncertainties to AZ/EL via the appropriate Jacobian.
+
+    Uses the same coordinate path as ``pixel_offset_to_azel``:
+    - ``"jacobian"`` — full J = ∂(pix)/∂(az,el)  →  Cov_azel = J⁻¹ Cov_pix (J⁻¹)ᵀ
+    - ``"astropy"`` — numerical Jacobian of the Galactic→AltAz transform
+    - ``"cdelt_fallback"`` — simple CDELT scaling
+
+    Returns ``(sigma_az_deg, sigma_el_deg)``.
+    """
+    if not np.isfinite(sigma_x_pix) or not np.isfinite(sigma_y_pix):
+        return float("nan"), float("nan")
+
+    if coord_method == "jacobian" and observer is not None:
+        J = _compute_azel_to_pixel_jacobian(observer, ref_header)
+        if J is not None and abs(np.linalg.det(J)) > 1e-12:
+            return _propagate_covariance_through_jacobian(
+                J, sigma_x_pix, sigma_y_pix, cov_xy_pix,
+            )
+
+    if coord_method in ("jacobian", "astropy") and observer is not None:
+        # Numerical Jacobian of Galactic→AltAz at the measured offset
+        cdelt1 = header_float(ref_header, "CDELT1", 0.0)
+        cdelt2 = header_float(ref_header, "CDELT2", 0.0)
+        ref_glon = header_float(ref_header, "CRVAL1", 0.0)
+        ref_glat = header_float(ref_header, "CRVAL2", 0.0)
+
+        dlon_deg = dx_pix * cdelt1
+        dlat_deg = dy_pix * cdelt2
+
+        eps = 1.0 / 3600.0  # 1 arcsec in degrees
+
+        def _azel_at(dl: float, db: float) -> tuple[float, float]:
+            return galactic_offset_to_azel(
+                observer[0], observer[1], observer[2], observer[3],
+                ref_glon, ref_glat, dl, db,
+            )
+
+        az0, el0 = _azel_at(dlon_deg, dlat_deg)
+        az_dl, el_dl = _azel_at(dlon_deg + eps, dlat_deg)
+        az_db, el_db = _azel_at(dlon_deg, dlat_deg + eps)
+
+        # Jacobian ∂(az,el)/∂(dlon,dlat)
+        J_gal = np.array([
+            [(az_dl - az0) / eps, (az_db - az0) / eps],
+            [(el_dl - el0) / eps, (el_db - el0) / eps],
+        ], dtype=float)
+
+        # Pixel covariance → (dlon, dlat) covariance (CDELT scaling)
+        cov_dl_dlat = np.array([
+            [sigma_x_pix ** 2 * cdelt1 ** 2, cov_xy_pix * cdelt1 * cdelt2],
+            [cov_xy_pix * cdelt1 * cdelt2, sigma_y_pix ** 2 * cdelt2 ** 2],
+        ], dtype=float)
+
+        try:
+            cov_azel = J_gal @ cov_dl_dlat @ J_gal.T
+            sigma_az = float(np.sqrt(max(cov_azel[0, 0], 0)))
+            sigma_el = float(np.sqrt(max(cov_azel[1, 1], 0)))
+            return sigma_az, sigma_el
+        except np.linalg.LinAlgError:
+            return float("nan"), float("nan")
+
+    # cdelt_fallback — simple scaling
+    cdelt1 = header_float(ref_header, "CDELT1", 0.0)
+    cdelt2 = header_float(ref_header, "CDELT2", 0.0)
+    sigma_az = sigma_x_pix * abs(cdelt1)
+    sigma_el = sigma_y_pix * abs(cdelt2)
+    return sigma_az, sigma_el
 
 
 def parse_line_and_mixer_from_name(file_path: Path) -> tuple[str | None, int | None]:
@@ -379,12 +554,114 @@ def measure_shift_integer(
     return lag_x, lag_y, float(corr[peak_y, peak_x]), corr
 
 
+def estimate_peak_uncertainty(
+    corr: np.ndarray,
+    peak_y: int,
+    peak_x: int,
+    half_window: int = 5,
+) -> tuple[float, float, float]:
+    """Estimate 1-σ pixel uncertainty of the correlation peak.
+
+    Fits a 2-D quadratic to log(C) in a window around the peak.  The
+    Hessian of log(C) at the peak gives the Fisher information — its
+    inverse is the covariance of the peak-position estimate
+    (Cramér-Rao bound for a Gaussian likelihood).
+
+    Returns ``(sigma_x, sigma_y, cov_xy)`` in pixels.
+    """
+    ny, nx = corr.shape
+    y0 = max(0, peak_y - half_window)
+    y1 = min(ny, peak_y + half_window + 1)
+    x0 = max(0, peak_x - half_window)
+    x1 = min(nx, peak_x + half_window + 1)
+
+    region = corr[y0:y1, x0:x1]
+    y_idx = np.arange(y0, y1, dtype=float)
+    x_idx = np.arange(x0, x1, dtype=float)
+    yy, xx = np.meshgrid(y_idx, x_idx, indexing="ij")
+
+    y_flat = yy.ravel()
+    x_flat = xx.ravel()
+    # Clip tiny / negative values so log is finite
+    z_flat = np.log(np.maximum(region.ravel(), 1e-12))
+
+    # Design matrix: 1, x, y, x², y², xy
+    A = np.column_stack([
+        np.ones_like(x_flat),
+        x_flat, y_flat,
+        x_flat * x_flat, y_flat * y_flat,
+        x_flat * y_flat,
+    ])
+
+    try:
+        coeffs, _residuals, _rank, _sv = np.linalg.lstsq(A, z_flat, rcond=None)
+    except np.linalg.LinAlgError:
+        return float("nan"), float("nan"), float("nan")
+
+    _a, _bx, _by, cxx, cyy, cxy = coeffs  # noqa: F841
+
+    # Hessian of log(C): H = [[2*cxx, cxy], [cxy, 2*cyy]]
+    H = np.array([[2 * cxx, cxy], [cxy, 2 * cyy]], dtype=float)
+
+    # Check negative-definiteness (concave = peak)
+    eigvals = np.linalg.eigvalsh(H)
+    if np.all(eigvals < 0):
+        cov = np.linalg.inv(-H)
+        sigma_x = float(np.sqrt(max(cov[0, 0], 0)))
+        sigma_y = float(np.sqrt(max(cov[1, 1], 0)))
+        cov_xy = float(cov[0, 1])
+    else:
+        # Hessian not negative-definite — fall back to RMS of fit residuals
+        resid = z_flat - A @ coeffs
+        rms = float(np.sqrt(np.mean(resid ** 2)))
+        sigma_x = sigma_y = max(rms, 0.5)
+        cov_xy = 0.0
+
+    return sigma_x, sigma_y, cov_xy
+
+
+def _propagate_covariance_through_jacobian(
+    J: np.ndarray,
+    sigma_x: float,
+    sigma_y: float,
+    cov_xy: float,
+) -> tuple[float, float]:
+    """Propagate pixel covariance through the Jacobian to AZ/EL space.
+
+    ``Cov_azel = J⁻¹ · Cov_pix · (J⁻¹)ᵀ``
+
+    Returns ``(sigma_az_deg, sigma_el_deg)``.
+    """
+    cov_pix = np.array([[sigma_x ** 2, cov_xy], [cov_xy, sigma_y ** 2]], dtype=float)
+    try:
+        J_inv = np.linalg.inv(J)
+        cov_azel = J_inv @ cov_pix @ J_inv.T
+        sigma_az = float(np.sqrt(max(cov_azel[0, 0], 0)))
+        sigma_el = float(np.sqrt(max(cov_azel[1, 1], 0)))
+    except np.linalg.LinAlgError:
+        return float("nan"), float("nan")
+    return sigma_az, sigma_el
+
+
 def header_float(header: fits.Header, key: str, default: float = 0.0) -> float:
     value = header.get(key, default)
     try:
         return float(cast(Any, value))
     except (TypeError, ValueError):
         return float(default)
+
+
+def fmt_uncertainty(val: float, sigfigs: int = 2) -> str:
+    """Format an uncertainty value for display.
+
+    Uses scientific notation for small values (``abs(val) < 1e-3``)
+    where decimal places become unreadable.
+    """
+    if not np.isfinite(val):
+        return "nan"
+    if abs(val) < 1e-3 and val != 0.0:
+        return f"{val:.{sigfigs - 1}e}"
+    return f"{val:.6f}"
 
 
 def save_correlation_png(
@@ -397,6 +674,10 @@ def save_correlation_png(
     dy_pix: float | None = None,
     dlon_deg: float | None = None,
     dlat_deg: float | None = None,
+    sigma_x_pix: float | None = None,
+    sigma_y_pix: float | None = None,
+    sigma_az_deg: float | None = None,
+    sigma_el_deg: float | None = None,
 ) -> None:
     fig = plt.figure(figsize=(7, 6), dpi=140)
     ax = fig.add_subplot(111)
@@ -414,9 +695,47 @@ def save_correlation_png(
 
     ax.plot(peak_x, peak_y, "rx", markersize=14, markeredgewidth=2.5)
 
+    # Uncertainty ellipse on peak if available
+    if (sigma_x_pix is not None and sigma_y_pix is not None
+            and np.isfinite(sigma_x_pix) and np.isfinite(sigma_y_pix)):
+        from matplotlib.patches import Ellipse
+        ellipse = Ellipse(
+            (peak_x, peak_y),
+            width=2 * sigma_x_pix,
+            height=2 * sigma_y_pix,
+            angle=0,
+            edgecolor="red",
+            facecolor="none",
+            linewidth=1.5,
+            linestyle="--",
+            alpha=0.8,
+        )
+        ax.add_patch(ellipse)
+
     cy_c, cx_c = (s // 2 for s in corr.shape)
     ax.set_xlim(cx_c - 75, cx_c + 75)
     ax.set_ylim(cy_c - 75, cy_c + 75)
+
+    # Info box with uncertainty
+    info_lines = []
+    if dx_pix is not None and dy_pix is not None:
+        info_lines.append(f"Pixel: ({dx_pix:+.1f}, {dy_pix:+.1f}) pix")
+    if sigma_x_pix is not None and sigma_y_pix is not None:
+        info_lines.append(
+            f"σ: ({fmt_uncertainty(sigma_x_pix)}, {fmt_uncertainty(sigma_y_pix)}) pix"
+        )
+    if sigma_az_deg is not None and sigma_el_deg is not None:
+        info_lines.append(
+            f"σ AZ/EL: ({fmt_uncertainty(sigma_az_deg)}, {fmt_uncertainty(sigma_el_deg)})°"
+        )
+    if info_lines:
+        ax.text(
+            0.02, 0.98, "\n".join(info_lines),
+            transform=ax.transAxes, fontsize=7, fontfamily="monospace",
+            verticalalignment="top",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.85),
+            zorder=13,
+        )
 
     fig.tight_layout()
     fig.savefig(str(out_path))
@@ -559,6 +878,13 @@ def process_job(data_root: Path, job: Job, config: dict[str, object]) -> JobResu
     dx_pix = -float(lag_x)
     dy_pix = -float(lag_y)
 
+    # Estimate pixel uncertainty from the correlation surface curvature
+    peak_y_c = corr.shape[0] // 2 + lag_y
+    peak_x_c = corr.shape[1] // 2 + lag_x
+    sigma_x_pix, sigma_y_pix, cov_xy_pix = estimate_peak_uncertainty(
+        corr, peak_y_c, peak_x_c,
+    )
+
     # Save reference moment-0 (FITS + PNG with centre crosshair only)
     _ref_map = save_moment0_products(
         ref_cube,
@@ -587,6 +913,13 @@ def process_job(data_root: Path, job: Job, config: dict[str, object]) -> JobResu
         dx_pix, dy_pix, ref_header, obs,
     )
 
+    # Propagate pixel uncertainty to AZ/EL
+    sigma_az_deg, sigma_el_deg = propagate_pixel_uncertainty_to_azel(
+        sigma_x_pix, sigma_y_pix, cov_xy_pix,
+        ref_header, obs, coord_method,
+        dx_pix=dx_pix, dy_pix=dy_pix,
+    )
+
     if coord_method == "cdelt_fallback":
         print(
             f"  WARNING: No observer metadata for {job.source}/{job.line}. "
@@ -612,6 +945,10 @@ def process_job(data_root: Path, job: Job, config: dict[str, object]) -> JobResu
         dy_pix=dy_pix,
         dlon_deg=dlon_deg,
         dlat_deg=dlat_deg,
+        sigma_x_pix=sigma_x_pix,
+        sigma_y_pix=sigma_y_pix,
+        sigma_az_deg=sigma_az_deg,
+        sigma_el_deg=sigma_el_deg,
     )
 
     return JobResult(
@@ -633,6 +970,10 @@ def process_job(data_root: Path, job: Job, config: dict[str, object]) -> JobResu
         coord_method=coord_method,
         status="OK",
         correlation_png=str(corr_png),
+        sigma_x_pix=sigma_x_pix,
+        sigma_y_pix=sigma_y_pix,
+        sigma_az_deg=sigma_az_deg,
+        sigma_el_deg=sigma_el_deg,
     )
 
 
@@ -660,8 +1001,22 @@ def write_delta_csv(rows: list[JobResult], out_path: Path) -> None:
 
     delta_rows: list[dict[str, object]] = []
     for pix_label, items in sorted(grouped.items()):
+        n = len(items)
         mean_az_deg = float(np.mean([item.az_deg for item in items]))
         mean_el_deg = float(np.mean([item.el_deg for item in items]))
+        mean_dx = float(np.mean([item.dx_pix for item in items]))
+        mean_dy = float(np.mean([item.dy_pix for item in items]))
+
+        # Aggregate uncertainties: σ_mean = √(Σ σ_i²) / N  (independent measurements)
+        az_uncs = [item.sigma_az_deg for item in items
+                   if np.isfinite(item.sigma_az_deg)]
+        el_uncs = [item.sigma_el_deg for item in items
+                   if np.isfinite(item.sigma_el_deg)]
+        sigma_az = (float(np.sqrt(sum(u ** 2 for u in az_uncs)) / max(len(az_uncs), 1))
+                    if az_uncs else float("nan"))
+        sigma_el = (float(np.sqrt(sum(u ** 2 for u in el_uncs)) / max(len(el_uncs), 1))
+                    if el_uncs else float("nan"))
+
         # Report the dominant conversion method used across contributors.
         methods = [item.coord_method for item in items]
         unique_method = methods[0] if len(set(methods)) == 1 else "mixed"
@@ -670,11 +1025,13 @@ def write_delta_csv(rows: list[JobResult], out_path: Path) -> None:
                 "pix_label": pix_label,
                 "line": items[0].line,
                 "target_mixer": items[0].target_mixer,
-                "source_count": len(items),
-                "mean_dx_pix": float(np.mean([item.dx_pix for item in items])),
-                "mean_dy_pix": float(np.mean([item.dy_pix for item in items])),
+                "source_count": n,
+                "mean_dx_pix": mean_dx,
+                "mean_dy_pix": mean_dy,
                 "mean_az_deg": mean_az_deg,
                 "mean_el_deg": mean_el_deg,
+                "sigma_az_deg": sigma_az,
+                "sigma_el_deg": sigma_el,
                 "coord_method": unique_method,
                 "contributors": ",".join(item.source for item in items),
             }
@@ -692,6 +1049,8 @@ def write_delta_csv(rows: list[JobResult], out_path: Path) -> None:
             "mean_dy_pix",
             "mean_az_deg",
             "mean_el_deg",
+            "sigma_az_deg",
+            "sigma_el_deg",
             "coord_method",
             "contributors",
         ],
@@ -737,7 +1096,8 @@ def main() -> None:
             print(
                 f"[{job.source} {job.line} M{job.mixer}] "
                 f"dx={row.dx_pix:+.1f} pix dy={row.dy_pix:+.1f} pix "
-                f"AZ={row.az_deg:+.6f} EL={row.el_deg:+.6f} "
+                f"AZ={row.az_deg:+.6f}±{fmt_uncertainty(row.sigma_az_deg)} "
+                f"EL={row.el_deg:+.6f}±{fmt_uncertainty(row.sigma_el_deg)} "
                 f"({row.coord_method})"
             )
             results.append(row)
@@ -785,6 +1145,10 @@ def main() -> None:
             "dy_pix",
             "az_deg",
             "el_deg",
+            "sigma_x_pix",
+            "sigma_y_pix",
+            "sigma_az_deg",
+            "sigma_el_deg",
             "coord_method",
             "status",
             "correlation_png",

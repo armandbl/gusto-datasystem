@@ -68,6 +68,8 @@ DEFAULT_LINE_TARGETS: dict[str, dict[str, object]] = {
 
 from measure_mixer_crosscorr import (  # type: ignore[import-not-found]  # noqa: E402
     build_moment0_map,
+    estimate_peak_uncertainty,
+    fmt_uncertainty,
     galactic_offset_to_azel,
     get_observer_metadata,
     header_float,
@@ -76,6 +78,7 @@ from measure_mixer_crosscorr import (  # type: ignore[import-not-found]  # noqa:
     parse_line_and_mixer_from_name,
     pixel_offset_to_azel,
     prep_map,
+    propagate_pixel_uncertainty_to_azel,
     select_cube,
 )
 
@@ -148,14 +151,18 @@ def plot_correlation_map(
     dlat_deg: float | None = None,
     az_deg: float | None = None,
     el_deg: float | None = None,
+    sigma_x_pix: float | None = None,
+    sigma_y_pix: float | None = None,
+    sigma_az_deg: float | None = None,
+    sigma_el_deg: float | None = None,
 ) -> None:
     """Save a highly annotated cross-correlation map.
 
     Marks:
     - The zero-lag centre (white dashed crosshair)
-    - The correlation peak (red X)
+    - The correlation peak (red X) with 1-σ error ellipse
     - An arrow from centre → peak
-    - Info box with peak value and converted angles
+    - Info box with peak value, offsets, and uncertainties
     """
     fig, ax = plt.subplots(figsize=(8, 7), dpi=150)
     im = ax.imshow(corr, origin="lower", cmap="viridis", aspect="auto")
@@ -178,21 +185,42 @@ def plot_correlation_map(
     # Peak marker
     _add_peak_marker(ax, peak_x, peak_y)
 
+    # Uncertainty ellipse (1-σ) if available
+    if (sigma_x_pix is not None and sigma_y_pix is not None
+            and np.isfinite(sigma_x_pix) and np.isfinite(sigma_y_pix)):
+        from matplotlib.patches import Ellipse
+        ellipse = Ellipse(
+            (peak_x, peak_y),
+            width=2 * sigma_x_pix,
+            height=2 * sigma_y_pix,
+            angle=0,
+            edgecolor="red",
+            facecolor="none",
+            linewidth=1.5,
+            linestyle="--",
+            alpha=0.8,
+        )
+        ax.add_patch(ellipse)
+
     # Offset arrow
     _add_offset_arrow(ax, cx, cy, peak_x, peak_y, dx_pix, dy_pix)
 
     # Info box
     lines = [
         f"Peak value: {peak_value:.3g}",
-        f"Peak position: ({peak_x}, {peak_y})",
-        f"Centre (zero-lag): ({cx}, {cy})",
         f"Pixel shift: ({dx_pix:+.1f}, {dy_pix:+.1f}) pix",
         f"Offset magnitude: {np.sqrt(dx_pix**2 + dy_pix**2):.1f} pix",
     ]
+    if (sigma_x_pix is not None and sigma_y_pix is not None
+            and np.isfinite(sigma_x_pix)):
+        lines.append(f"σ_pix: ({fmt_uncertainty(sigma_x_pix)}, {fmt_uncertainty(sigma_y_pix)}) pix")
     if dlon_deg is not None and dlat_deg is not None:
         lines.append(f"Galactic: ({dlon_deg:+.4f}, {dlat_deg:+.4f})°")
     if az_deg is not None and el_deg is not None:
         lines.append(f"AZ/EL: ({az_deg:+.5f}, {el_deg:+.5f})°")
+    if (sigma_az_deg is not None and sigma_el_deg is not None
+            and np.isfinite(sigma_az_deg)):
+        lines.append(f"σ_AZ/EL: ({fmt_uncertainty(sigma_az_deg)}, {fmt_uncertainty(sigma_el_deg)})°")
 
     ax.text(
         0.02,
@@ -266,17 +294,25 @@ def plot_combined_before_after(
             offset_mag = np.sqrt(dx**2 + dy**2)
             dlon = res.get("dlon_deg")
             dlat = res.get("dlat_deg")
+            sigma_x = res.get("sigma_x_pix")
+            sigma_y = res.get("sigma_y_pix")
+            sigma_az = res.get("sigma_az_deg")
+            sigma_el = res.get("sigma_el_deg")
 
             info = [
                 f"({dx:+.1f}, {dy:+.1f}) pix",
                 f"|offset| = {offset_mag:.1f} pix",
             ]
+            if sigma_x is not None and np.isfinite(float(sigma_x)):
+                info.append(f"σ: ({fmt_uncertainty(float(sigma_x))}, {fmt_uncertainty(float(sigma_y))}) pix")
             if dlon is not None and dlat is not None:
                 info.append(f"Gal: ({float(dlon):+.4f}, {float(dlat):+.4f})°")
             az = res.get("az_deg")
             el = res.get("el_deg")
             if az is not None and el is not None:
                 info.append(f"AZ/EL: ({float(az):+.5f}, {float(el):+.5f})°")
+            if sigma_az is not None and np.isfinite(float(sigma_az)):
+                info.append(f"σ AZ/EL: ({fmt_uncertainty(float(sigma_az))}, {fmt_uncertainty(float(sigma_el))})°")
 
             ax.text(
                 0.02, 0.98, "\n".join(info),
@@ -340,10 +376,24 @@ def process_one_mixer_pair(
     dx_pix = -float(lag_x)
     dy_pix = -float(lag_y)
 
+    # Estimate pixel uncertainty from the correlation surface curvature
+    peak_y_c = corr.shape[0] // 2 + lag_y
+    peak_x_c = corr.shape[1] // 2 + lag_x
+    sigma_x_pix, sigma_y_pix, cov_xy_pix = estimate_peak_uncertainty(
+        corr, peak_y_c, peak_x_c,
+    )
+
     # Coordinate conversion
     obs = get_observer_metadata(config, data_root, source, line)
     az_deg, el_deg, coord_method = pixel_offset_to_azel(
         dx_pix, dy_pix, ref_header, obs
+    )
+
+    # Propagate pixel uncertainty to AZ/EL
+    sigma_az_deg, sigma_el_deg = propagate_pixel_uncertainty_to_azel(
+        sigma_x_pix, sigma_y_pix, cov_xy_pix,
+        ref_header, obs, coord_method,
+        dx_pix=dx_pix, dy_pix=dy_pix,
     )
 
     cdelt1 = header_float(ref_header, "CDELT1", 0.0)
@@ -378,6 +428,10 @@ def process_one_mixer_pair(
         dlat_deg=dlat_deg,
         az_deg=az_deg,
         el_deg=el_deg,
+        sigma_x_pix=sigma_x_pix,
+        sigma_y_pix=sigma_y_pix,
+        sigma_az_deg=sigma_az_deg,
+        sigma_el_deg=sigma_el_deg,
     )
 
     # Save correlation surface as FITS for potential reuse
@@ -401,6 +455,10 @@ def process_one_mixer_pair(
         "az_deg": az_deg,
         "el_deg": el_deg,
         "coord_method": coord_method,
+        "sigma_x_pix": sigma_x_pix,
+        "sigma_y_pix": sigma_y_pix,
+        "sigma_az_deg": sigma_az_deg,
+        "sigma_el_deg": sigma_el_deg,
         "corr_fits": str(corr_fits),
         "corr_png": str(corr_png),
         "label": label,
@@ -460,11 +518,13 @@ def process_all_pairs(
                 output_dir=output_dir,
                 label=label,
             )
+            saz = res.get("sigma_az_deg", float("nan"))
+            sel = res.get("sigma_el_deg", float("nan"))
             print(
                 f"    dx={res['dx_pix']:+.1f} pix  "
                 f"dy={res['dy_pix']:+.1f} pix  "
-                f"AZ={res['az_deg']:+.6f}°  "
-                f"EL={res['el_deg']:+.6f}°"
+                f"AZ={res['az_deg']:+.6f}±{fmt_uncertainty(float(saz))}°  "
+                f"EL={res['el_deg']:+.6f}±{fmt_uncertainty(float(sel))}°"
             )
             results.append(res)
         except Exception as exc:
@@ -677,12 +737,15 @@ def main() -> None:
     print(f"SUMMARY [{label}]")
     print(f"{'='*60}")
     for r in all_results:
+        saz = r.get("sigma_az_deg", float("nan"))
+        sel = r.get("sigma_el_deg", float("nan"))
         print(
             f"  {r['source']:6s} {r['line']:3s} "
             f"M{r['ref_mixer']} vs M{r['tgt_mixer']}:  "
             f"dx={r['dx_pix']:+.1f}  dy={r['dy_pix']:+.1f} pix  "
             f"|offset|={np.sqrt(float(r['dx_pix'])**2 + float(r['dy_pix'])**2):.1f} pix  "
-            f"AZ={r['az_deg']:+.6f}°  EL={r['el_deg']:+.6f}°"
+            f"AZ={r['az_deg']:+.6f}±{fmt_uncertainty(float(saz))}°  "
+            f"EL={r['el_deg']:+.6f}±{fmt_uncertainty(float(sel))}°"
         )
 
     # ------------------------------------------------------------------

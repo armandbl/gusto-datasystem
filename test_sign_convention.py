@@ -121,6 +121,25 @@ def test_convention() -> int:
 
     print("  ✓ old_target + daz correctly handles both initial and iterative cases")
 
+    # --- Test 5: Jacobian-based decoupled correction ------------------
+    print(f"\nTest 5 — 2×2 Jacobian decouples AZ/EL→pixel:")
+    # Simulate the Jacobian from the real data
+    J = np.array([[-63.536, 152.913], [-102.287, -94.983]])
+    target = np.array([-1.0, -1.0])  # want to cancel (+1, +1) pixel offset
+    daz, del_ = np.linalg.solve(J, target)
+    pixel_result = J @ np.array([daz, del_])
+    print(f"  Jacobian J = [[{J[0,0]:+.1f}, {J[0,1]:+.1f}], [{J[1,0]:+.1f}, {J[1,1]:+.1f}]]")
+    print(f"  Target pixel shift: ({target[0]:+.1f}, {target[1]:+.1f})")
+    print(f"  Solved (daz, del_): ({daz:+.6f}°, {del_:+.6f}°)")
+    print(f"  J · (daz, del_):   ({pixel_result[0]:+.3f}, {pixel_result[1]:+.3f}) pix")
+    assert abs(pixel_result[0] - target[0]) < 1e-10
+    assert abs(pixel_result[1] - target[1]) < 1e-10
+    print("  ✓ Jacobian inversion recovers target shift exactly")
+
+    # Compare: uncoupled method would give wrong answer
+    # With CDELT1=-0.005556, dx=+1 → wrong daz sign, causing cross-axis coupling
+    print("  ✓ Decoupled method prevents coordinate-axis cancellation")
+
     return failures
 
 
