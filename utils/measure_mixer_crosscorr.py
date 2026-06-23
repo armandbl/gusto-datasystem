@@ -24,6 +24,7 @@ from astropy.coordinates import AltAz, EarthLocation, SkyCoord
 from astropy.io import fits
 from astropy.time import Time
 from astropy.wcs import WCS
+from scipy.optimize import curve_fit
 from scipy.signal import fftconvolve
 
 matplotlib.use("Agg")
@@ -298,7 +299,7 @@ def pixel_offset_to_azel(
     """
     if observer is not None:
         J = _compute_azel_to_pixel_jacobian(observer, ref_header)
-        if J is not None and abs(np.linalg.det(J)) > 1e-12:
+        if J is not None and _jacobian_is_reliable(J):
             # Solve: J · [daz, del_] = [-dx_pix, -dy_pix]
             # (we want to CANCEL the measured offset)
             target = np.array([-dx_pix, -dy_pix], dtype=float)
@@ -352,7 +353,7 @@ def propagate_pixel_uncertainty_to_azel(
 
     if coord_method == "jacobian" and observer is not None:
         J = _compute_azel_to_pixel_jacobian(observer, ref_header)
-        if J is not None and abs(np.linalg.det(J)) > 1e-12:
+        if J is not None and _jacobian_is_reliable(J):
             return _propagate_covariance_through_jacobian(
                 J, sigma_x_pix, sigma_y_pix, cov_xy_pix,
             )
@@ -554,20 +555,95 @@ def measure_shift_integer(
     return lag_x, lag_y, float(corr[peak_y, peak_x]), corr
 
 
-def estimate_peak_uncertainty(
+def _fallback_uncertainty(
+    corr: np.ndarray,
+    peak_y: int,
+    peak_x: int,
+) -> tuple[float, float, float]:
+    """Estimate peak-position uncertainty from the correlation width and SNR.
+
+    Uses the matched-filter relation:  σ_peak ≈ σ_corr / SNR
+
+    where σ_corr is the correlation-peak width (from FWHM / 2.355) and
+    SNR = (peak_value − background) / noise_rms.
+
+    This is a model-free fallback — it needs no Gaussian fit and works on
+    any correlation surface with a well-defined peak.
+    """
+    ny, nx = corr.shape
+    peak_val = float(corr[peak_y, peak_x])
+
+    # --- noise floor: RMS of outer region (> ¼ of the image from peak) ---
+    dy, dx = np.mgrid[0:ny, 0:nx]
+    dist = np.sqrt((dx - peak_x) ** 2 + (dy - peak_y) ** 2)
+    outer_mask = dist > max(nx, ny) / 4.0
+    if np.sum(outer_mask) < 20:
+        noise_rms = float(np.nanstd(corr))
+    else:
+        noise_rms = float(np.nanstd(corr[outer_mask]))
+
+    if noise_rms < 1e-15:
+        noise_rms = 1e-15
+
+    bg = float(np.median(corr[outer_mask])) if np.sum(outer_mask) >= 20 else 0.0
+    snr = (peak_val - bg) / noise_rms
+
+    # --- FWHM along x and y through the peak ---
+    half_max = bg + (peak_val - bg) / 2.0
+
+    # x-direction
+    x_profile = corr[peak_y, :] - bg
+    above = np.where(x_profile >= half_max - bg)[0]
+    if len(above) >= 2:
+        fwhm_x = float(above[-1] - above[0] + 1)
+    else:
+        # No clear half-max crossing — use half the image as a crude bound
+        fwhm_x = float(nx) / 2.0
+
+    # y-direction
+    y_profile = corr[:, peak_x] - bg
+    above = np.where(y_profile >= half_max - bg)[0]
+    if len(above) >= 2:
+        fwhm_y = float(above[-1] - above[0] + 1)
+    else:
+        fwhm_y = float(ny) / 2.0
+
+    sigma_corr_x = fwhm_x / 2.355
+    sigma_corr_y = fwhm_y / 2.355
+
+    # Matched-filter relation: σ_peak = σ_corr / SNR
+    sigma_x = sigma_corr_x / max(snr, 1.0)
+    sigma_y = sigma_corr_y / max(snr, 1.0)
+
+    return sigma_x, sigma_y, 0.0
+
+
+def measure_shift_with_uncertainty(
     corr: np.ndarray,
     peak_y: int,
     peak_x: int,
     half_window: int = 5,
-) -> tuple[float, float, float]:
-    """Estimate 1-σ pixel uncertainty of the correlation peak.
+) -> tuple[float, float, float, float, float]:
+    """Sub-pixel shift and formal uncertainty from a 2-D Gaussian fit to the correlation peak.
 
-    Fits a 2-D quadratic to log(C) in a window around the peak.  The
-    Hessian of log(C) at the peak gives the Fisher information — its
-    inverse is the covariance of the peak-position estimate
-    (Cramér-Rao bound for a Gaussian likelihood).
+    Fits ``A * exp(-((x-x0)²/(2σx²) + (y-y0)²/(2σy²))) + B`` directly to
+    the correlation values *C(x,y)* (not log-transformed) in a ±*half_window*
+    pixel window.  Uses ``scipy.optimize.curve_fit`` whose output parameter
+    covariance is a proper estimator covariance under the assumption of
+    i.i.d. Gaussian noise on the correlation values.
 
-    Returns ``(sigma_x, sigma_y, cov_xy)`` in pixels.
+    Returns ``(x0, y0, sigma_x, sigma_y, cov_xy)`` where:
+
+    * **x0, y0** — sub-pixel peak position in correlation-surface array
+      coordinates (NOT lags).  Convert to lags via
+      ``lag_x = x0 - corr.shape[1] // 2``.
+    * **sigma_x** — 1-σ uncertainty on *x0* from the fit covariance [pixels]
+    * **sigma_y** — 1-σ uncertainty on *y0* from the fit covariance [pixels]
+    * **cov_xy** — covariance between *x0* and *y0* [pixels²]
+
+    On fit failure falls back to ``_fallback_uncertainty()`` which estimates
+    σ from the correlation peak width and signal-to-noise ratio
+    (σ ≈ FWHM / (2.355 × SNR)) — no free parameters, driven by the data.
     """
     ny, nx = corr.shape
     y0 = max(0, peak_y - half_window)
@@ -579,45 +655,101 @@ def estimate_peak_uncertainty(
     y_idx = np.arange(y0, y1, dtype=float)
     x_idx = np.arange(x0, x1, dtype=float)
     yy, xx = np.meshgrid(y_idx, x_idx, indexing="ij")
-
-    y_flat = yy.ravel()
     x_flat = xx.ravel()
-    # Clip tiny / negative values so log is finite
-    z_flat = np.log(np.maximum(region.ravel(), 1e-12))
+    y_flat = yy.ravel()
+    z_flat = region.ravel()
 
-    # Design matrix: 1, x, y, x², y², xy
-    A = np.column_stack([
-        np.ones_like(x_flat),
-        x_flat, y_flat,
-        x_flat * x_flat, y_flat * y_flat,
-        x_flat * y_flat,
-    ])
+    # Initial guesses
+    amp0 = float(corr[peak_y, peak_x] - np.median(region))
+    bg0 = float(np.median(region))
+    # Initial guesses — estimate sigma from FWHM of the peak profile
+    # (much better than a hardcoded 2.0 px for extended sources)
+    _xprof = region[peak_y - y0, :]
+    _yprof = region[:, peak_x - x0]
+    _half = (amp0 + bg0) / 2.0 if np.isfinite(amp0 + bg0) else amp0 / 2.0 + bg0
+    _above_x = np.where(_xprof >= _half)[0]
+    _above_y = np.where(_yprof >= _half)[0]
+    if len(_above_x) >= 2:
+        sx0 = max(float(_above_x[-1] - _above_x[0] + 1) / 2.355, 0.5)
+    else:
+        sx0 = 2.0
+    if len(_above_y) >= 2:
+        sy0 = max(float(_above_y[-1] - _above_y[0] + 1) / 2.355, 0.5)
+    else:
+        sy0 = 2.0
+
+    # ponytail: sigma bound is 2× half_window — extended sources (G337)
+    #           can have correlation peaks wider than 5 px.
+    _sigma_max = float(half_window * 2)
+
+    def _gaussian_2d(xy, amplitude, xc, yc, sigma_x, sigma_y, bg):
+        x, y = xy
+        return amplitude * np.exp(
+            -((x - xc) ** 2 / (2 * sigma_x ** 2) + (y - yc) ** 2 / (2 * sigma_y ** 2))
+        ) + bg
+
+    p0 = [amp0, float(peak_x), float(peak_y), sx0, sy0, bg0]
+    bounds = (
+        [0.0, x_idx[0], y_idx[0], 0.5, 0.5, -np.inf],
+        [np.inf, x_idx[-1], y_idx[-1], _sigma_max, _sigma_max, np.inf],
+    )
 
     try:
-        coeffs, _residuals, _rank, _sv = np.linalg.lstsq(A, z_flat, rcond=None)
-    except np.linalg.LinAlgError:
-        return float("nan"), float("nan"), float("nan")
+        popt, pcov = curve_fit(
+            _gaussian_2d,
+            (x_flat, y_flat),
+            z_flat,
+            p0=p0,
+            bounds=bounds,
+            maxfev=2000,
+        )
+    except (RuntimeError, ValueError):
+        # Fit failed — return conservative beam-scale fallback
+        return float(peak_x), float(peak_y), *_fallback_uncertainty(corr, peak_y, peak_x)
 
-    _a, _bx, _by, cxx, cyy, cxy = coeffs  # noqa: F841
+    x0_fit = float(popt[1])
+    y0_fit = float(popt[2])
 
-    # Hessian of log(C): H = [[2*cxx, cxy], [cxy, 2*cyy]]
-    H = np.array([[2 * cxx, cxy], [cxy, 2 * cyy]], dtype=float)
+    # Check that the parameter covariance is usable
+    if np.linalg.cond(pcov) > 1e6 or not np.all(np.isfinite(pcov)):
+        return x0_fit, y0_fit, *_fallback_uncertainty(corr, peak_y, peak_x)
 
-    # Check negative-definiteness (concave = peak)
-    eigvals = np.linalg.eigvalsh(H)
-    if np.all(eigvals < 0):
-        cov = np.linalg.inv(-H)
-        sigma_x = float(np.sqrt(max(cov[0, 0], 0)))
-        sigma_y = float(np.sqrt(max(cov[1, 1], 0)))
-        cov_xy = float(cov[0, 1])
-    else:
-        # Hessian not negative-definite — fall back to RMS of fit residuals
-        resid = z_flat - A @ coeffs
-        rms = float(np.sqrt(np.mean(resid ** 2)))
-        sigma_x = sigma_y = max(rms, 0.5)
-        cov_xy = 0.0
+    sigma_x = float(np.sqrt(max(pcov[1, 1], 0)))
+    sigma_y = float(np.sqrt(max(pcov[2, 2], 0)))
+    cov_xy = float(pcov[1, 2])
 
+    return x0_fit, y0_fit, sigma_x, sigma_y, cov_xy
+
+
+def estimate_peak_uncertainty(
+    corr: np.ndarray,
+    peak_y: int,
+    peak_x: int,
+    half_window: int = 5,
+) -> tuple[float, float, float]:
+    """Estimate 1-σ pixel uncertainty of the correlation peak.
+
+    .. deprecated::
+        Use :func:`measure_shift_with_uncertainty` instead — it provides
+        sub-pixel position AND proper formal covariance from a 2-D Gaussian
+        fit.  This wrapper is kept for backward compatibility and returns
+        only the uncertainty portion.
+
+    Returns ``(sigma_x, sigma_y, cov_xy)`` in pixels.
+    """
+    _x0, _y0, sigma_x, sigma_y, cov_xy = measure_shift_with_uncertainty(
+        corr, peak_y, peak_x, half_window,
+    )
     return sigma_x, sigma_y, cov_xy
+
+
+def _jacobian_is_reliable(J: np.ndarray, cond_threshold: float = 10.0) -> bool:
+    """Check whether a 2×2 Jacobian is well-conditioned for inversion.
+
+    Returns ``True`` if both ``|det(J)| > 1e-12`` and
+    ``cond(J) < cond_threshold``.
+    """
+    return bool(abs(np.linalg.det(J)) > 1e-12 and np.linalg.cond(J) < cond_threshold)
 
 
 def _propagate_covariance_through_jacobian(
@@ -632,6 +764,8 @@ def _propagate_covariance_through_jacobian(
 
     Returns ``(sigma_az_deg, sigma_el_deg)``.
     """
+    if not _jacobian_is_reliable(J):
+        return float("nan"), float("nan")
     cov_pix = np.array([[sigma_x ** 2, cov_xy], [cov_xy, sigma_y ** 2]], dtype=float)
     try:
         J_inv = np.linalg.inv(J)
@@ -874,16 +1008,20 @@ def process_job(data_root: Path, job: Job, config: dict[str, object]) -> JobResu
     map_ref = build_moment0_map(ref_cube)
     map_tgt = build_moment0_map(tgt_cube)
 
-    lag_x, lag_y, peak_val, corr = measure_shift_integer(map_ref, map_tgt)
-    dx_pix = -float(lag_x)
-    dy_pix = -float(lag_y)
+    lag_x_int, lag_y_int, peak_val, corr = measure_shift_integer(map_ref, map_tgt)
 
-    # Estimate pixel uncertainty from the correlation surface curvature
-    peak_y_c = corr.shape[0] // 2 + lag_y
-    peak_x_c = corr.shape[1] // 2 + lag_x
-    sigma_x_pix, sigma_y_pix, cov_xy_pix = estimate_peak_uncertainty(
+    # Sub-pixel Gaussian fit for both offset AND formal uncertainty
+    peak_y_c = corr.shape[0] // 2 + lag_y_int
+    peak_x_c = corr.shape[1] // 2 + lag_x_int
+    x0_sub, y0_sub, sigma_x_pix, sigma_y_pix, cov_xy_pix = measure_shift_with_uncertainty(
         corr, peak_y_c, peak_x_c,
     )
+
+    center_y, center_x = corr.shape[0] // 2, corr.shape[1] // 2
+    lag_x = x0_sub - center_x
+    lag_y = y0_sub - center_y
+    dx_pix = -float(lag_x)
+    dy_pix = -float(lag_y)
 
     # Save reference moment-0 (FITS + PNG with centre crosshair only)
     _ref_map = save_moment0_products(
@@ -919,6 +1057,16 @@ def process_job(data_root: Path, job: Job, config: dict[str, object]) -> JobResu
         ref_header, obs, coord_method,
         dx_pix=dx_pix, dy_pix=dy_pix,
     )
+
+    # --- Systematic uncertainty floor (gondola pointing, thermal flexure) ---
+    # ponytail: single configurable floor added in quadrature; refit if
+    #           per-epoch attitude reconstruction becomes available.
+    _sys_floor_arcsec = float(config.get("systematic_floor_arcsec", 15.0))
+    _sys_floor_deg = _sys_floor_arcsec / 3600.0
+    if np.isfinite(sigma_az_deg):
+        sigma_az_deg = float(np.sqrt(sigma_az_deg ** 2 + _sys_floor_deg ** 2))
+    if np.isfinite(sigma_el_deg):
+        sigma_el_deg = float(np.sqrt(sigma_el_deg ** 2 + _sys_floor_deg ** 2))
 
     if coord_method == "cdelt_fallback":
         print(
@@ -961,8 +1109,8 @@ def process_job(data_root: Path, job: Job, config: dict[str, object]) -> JobResu
         target_cube=target_cube_path.name,
         reference_moment0=str(reference_moment0_path),
         target_moment0=str(target_moment0_path),
-        shift_x=lag_x,
-        shift_y=lag_y,
+        shift_x=lag_x_int,
+        shift_y=lag_y_int,
         dx_pix=dx_pix,
         dy_pix=dy_pix,
         az_deg=az_deg,
@@ -981,6 +1129,43 @@ def process_job(data_root: Path, job: Job, config: dict[str, object]) -> JobResu
 # CSV output
 # ---------------------------------------------------------------------------
 
+# Offset-type priority matching getMixerOffsets() in L10_pointing.py
+_EFFECTIVE_PRIORITY = ("AS_MEASURED", "FIDUCIAL", "THEORY")
+
+
+def _read_effective_offsets(offsets_path: Path) -> dict[str, tuple[float, float]]:
+    """Read the currently-effective (az, el) for each mixer from an offsets file.
+
+    Uses the same priority logic as ``getMixerOffsets()``:
+    AS_MEASURED > FIDUCIAL > THEORY, last-in-type wins.
+    """
+    raw: dict[str, list[tuple[float, float, str]]] = {}
+    for line in offsets_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("[") or stripped.upper().startswith("PIX"):
+            continue
+        cols = stripped.split()
+        if len(cols) < 4:
+            continue
+        try:
+            az = float(cols[1])
+            el = float(cols[2])
+        except ValueError:
+            continue
+        pix_label = cols[0]
+        etype = cols[3].upper()
+        raw.setdefault(pix_label, []).append((az, el, etype))
+
+    effective: dict[str, tuple[float, float]] = {}
+    for pix_label, entries in raw.items():
+        for ptype in _EFFECTIVE_PRIORITY:
+            matches = [(az, el) for az, el, et in entries if et == ptype]
+            if matches:
+                effective[pix_label] = matches[-1]
+                break
+    return effective
+
+
 def write_csv(rows: list[dict[str, object]], out_path: Path, fieldnames: list[str]) -> None:
     if not rows:
         return
@@ -991,13 +1176,19 @@ def write_csv(rows: list[dict[str, object]], out_path: Path, fieldnames: list[st
             writer.writerow({name: row.get(name, "") for name in fieldnames})
 
 
-def write_delta_csv(rows: list[JobResult], out_path: Path) -> None:
+def write_delta_csv(rows: list[JobResult], out_path: Path,
+                    offsets_file: Path | None = None) -> None:
     grouped: dict[str, list[JobResult]] = {}
     for row in rows:
         if row.status != "OK":
             continue
         pix_label = pix_label_from_line_mixer(row.line, row.mixer)
         grouped.setdefault(pix_label, []).append(row)
+
+    # Read current effective offsets if available (for relationship columns)
+    effective_offsets: dict[str, tuple[float, float]] = {}
+    if offsets_file is not None and offsets_file.exists():
+        effective_offsets = _read_effective_offsets(offsets_file)
 
     delta_rows: list[dict[str, object]] = []
     for pix_label, items in sorted(grouped.items()):
@@ -1020,6 +1211,14 @@ def write_delta_csv(rows: list[JobResult], out_path: Path) -> None:
         # Report the dominant conversion method used across contributors.
         methods = [item.coord_method for item in items]
         unique_method = methods[0] if len(set(methods)) == 1 else "mixed"
+
+        # Current effective offset and proposed new absolute offset
+        old = effective_offsets.get(pix_label)
+        old_az = old[0] if old else float("nan")
+        old_el = old[1] if old else float("nan")
+        new_az = old_az + mean_az_deg if np.isfinite(old_az) else float("nan")
+        new_el = old_el + mean_el_deg if np.isfinite(old_el) else float("nan")
+
         delta_rows.append(
             {
                 "pix_label": pix_label,
@@ -1028,10 +1227,14 @@ def write_delta_csv(rows: list[JobResult], out_path: Path) -> None:
                 "source_count": n,
                 "mean_dx_pix": mean_dx,
                 "mean_dy_pix": mean_dy,
-                "mean_az_deg": mean_az_deg,
-                "mean_el_deg": mean_el_deg,
+                "residual_az_deg": mean_az_deg,
+                "residual_el_deg": mean_el_deg,
                 "sigma_az_deg": sigma_az,
                 "sigma_el_deg": sigma_el,
+                "effective_az_deg": old_az,
+                "effective_el_deg": old_el,
+                "proposed_az_deg": new_az,
+                "proposed_el_deg": new_el,
                 "coord_method": unique_method,
                 "contributors": ",".join(item.source for item in items),
             }
@@ -1047,10 +1250,14 @@ def write_delta_csv(rows: list[JobResult], out_path: Path) -> None:
             "source_count",
             "mean_dx_pix",
             "mean_dy_pix",
-            "mean_az_deg",
-            "mean_el_deg",
+            "residual_az_deg",
+            "residual_el_deg",
             "sigma_az_deg",
             "sigma_el_deg",
+            "effective_az_deg",
+            "effective_el_deg",
+            "proposed_az_deg",
+            "proposed_el_deg",
             "coord_method",
             "contributors",
         ],
@@ -1154,10 +1361,52 @@ def main() -> None:
             "correlation_png",
         ],
     )
-    write_delta_csv(results, delta_out)
+    # Resolve offsets file path for relationship columns
+    offsets_cfg = str(config.get("offsets_file", ""))
+    offsets_path: Path | None = None
+    if offsets_cfg:
+        offsets_path = ((repo_root / offsets_cfg).resolve()
+                        if not Path(offsets_cfg).is_absolute()
+                        else Path(offsets_cfg))
+        if not offsets_path.exists():
+            print(f"NOTE: offsets_file '{offsets_path}' not found — "
+                  f"skipping effective/proposed columns in delta CSV")
+            offsets_path = None
+
+    write_delta_csv(results, delta_out, offsets_file=offsets_path)
 
     print(f"Saved measurements CSV: {measurements_out}")
     print(f"Saved delta CSV: {delta_out}")
+
+    # ── Relationship summary ──────────────────────────────────────────
+    if offsets_path is not None:
+        eff = _read_effective_offsets(offsets_path)
+        if eff:
+            print(f"\n{'='*70}")
+            print("OFFSET RELATIONSHIP SUMMARY")
+            print(f"{'='*70}")
+            print(f"  Offsets file: {offsets_path}")
+            print(f"  Formula:  proposed_AS_MEASURED = effective_offset + residual")
+            print(f"  (The cross-corr measures the RESIDUAL shift; the offsets")
+            print(f"   file stores the ABSOLUTE offset per mixer.)")
+            print(f"  {'Mixer':8s} {'Effective':>24s}  {'Residual':>24s}  {'Proposed':>24s}")
+            print(f"  {'':8s} {'AZ (deg)':>12s} {'EL (deg)':>12s}  "
+                  f"{'AZ (deg)':>12s} {'EL (deg)':>12s}  "
+                  f"{'AZ (deg)':>12s} {'EL (deg)':>12s}")
+            print(f"  {'-'*8} {'-'*24}  {'-'*24}  {'-'*24}")
+            for r in results:
+                if r.status != "OK":
+                    continue
+                pl = pix_label_from_line_mixer(r.line, r.mixer)
+                old = eff.get(pl)
+                old_az = old[0] if old else float("nan")
+                old_el = old[1] if old else float("nan")
+                new_az = old_az + r.az_deg if np.isfinite(old_az) else float("nan")
+                new_el = old_el + r.el_deg if np.isfinite(old_el) else float("nan")
+                print(f"  {pl:8s} {old_az:12.6f} {old_el:12.6f}  "
+                      f"{r.az_deg:12.6f} {r.el_deg:12.6f}  "
+                      f"{new_az:12.6f} {new_el:12.6f}")
+            print(f"  {'='*70}")
 
 
 if __name__ == "__main__":

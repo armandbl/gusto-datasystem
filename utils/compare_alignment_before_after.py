@@ -68,13 +68,13 @@ DEFAULT_LINE_TARGETS: dict[str, dict[str, object]] = {
 
 from measure_mixer_crosscorr import (  # type: ignore[import-not-found]  # noqa: E402
     build_moment0_map,
-    estimate_peak_uncertainty,
     fmt_uncertainty,
     galactic_offset_to_azel,
     get_observer_metadata,
     header_float,
     load_cube,
     measure_shift_integer,
+    measure_shift_with_uncertainty,
     parse_line_and_mixer_from_name,
     pixel_offset_to_azel,
     prep_map,
@@ -142,8 +142,8 @@ def plot_correlation_map(
     ref_mixer: int,
     tgt_mixer: int,
     label: str,
-    lag_x: int,
-    lag_y: int,
+    lag_x: float,
+    lag_y: float,
     dx_pix: float,
     dy_pix: float,
     peak_value: float,
@@ -371,17 +371,21 @@ def process_one_mixer_pair(
     map_ref = build_moment0_map(ref_cube)
     map_tgt = build_moment0_map(tgt_cube)
 
-    # Cross-correlation
-    lag_x, lag_y, peak_val, corr = measure_shift_integer(map_ref, map_tgt)
-    dx_pix = -float(lag_x)
-    dy_pix = -float(lag_y)
+    # Cross-correlation (integer argmax for peak_val)
+    lag_x_int, lag_y_int, peak_val, corr = measure_shift_integer(map_ref, map_tgt)
 
-    # Estimate pixel uncertainty from the correlation surface curvature
-    peak_y_c = corr.shape[0] // 2 + lag_y
-    peak_x_c = corr.shape[1] // 2 + lag_x
-    sigma_x_pix, sigma_y_pix, cov_xy_pix = estimate_peak_uncertainty(
+    # Sub-pixel Gaussian fit for both offset AND formal uncertainty
+    peak_y_c = corr.shape[0] // 2 + lag_y_int
+    peak_x_c = corr.shape[1] // 2 + lag_x_int
+    x0_sub, y0_sub, sigma_x_pix, sigma_y_pix, cov_xy_pix = measure_shift_with_uncertainty(
         corr, peak_y_c, peak_x_c,
     )
+
+    center_y, center_x = corr.shape[0] // 2, corr.shape[1] // 2
+    lag_x = x0_sub - center_x
+    lag_y = y0_sub - center_y
+    dx_pix = -float(lag_x)
+    dy_pix = -float(lag_y)
 
     # Coordinate conversion
     obs = get_observer_metadata(config, data_root, source, line)
@@ -395,6 +399,14 @@ def process_one_mixer_pair(
         ref_header, obs, coord_method,
         dx_pix=dx_pix, dy_pix=dy_pix,
     )
+
+    # Systematic uncertainty floor (same as process_job)
+    _sys_floor_arcsec = float(config.get("systematic_floor_arcsec", 15.0))
+    _sys_floor_deg = _sys_floor_arcsec / 3600.0
+    if np.isfinite(sigma_az_deg):
+        sigma_az_deg = float(np.sqrt(sigma_az_deg ** 2 + _sys_floor_deg ** 2))
+    if np.isfinite(sigma_el_deg):
+        sigma_el_deg = float(np.sqrt(sigma_el_deg ** 2 + _sys_floor_deg ** 2))
 
     cdelt1 = header_float(ref_header, "CDELT1", 0.0)
     cdelt2 = header_float(ref_header, "CDELT2", 0.0)
@@ -445,8 +457,8 @@ def process_one_mixer_pair(
         "tgt_mixer": tgt_mixer,
         "ref_cube": ref_path.name,
         "tgt_cube": tgt_path.name,
-        "lag_x": lag_x,
-        "lag_y": lag_y,
+        "lag_x": lag_x_int,
+        "lag_y": lag_y_int,
         "dx_pix": dx_pix,
         "dy_pix": dy_pix,
         "peak_value": peak_val,
@@ -611,6 +623,51 @@ def generate_comparisons(
         comp_png = comparison_dir / "comparison_before_after.png"
         print(f"  Generating combined comparison ({len(pairs)} pairs): {comp_png.name}")
         plot_combined_before_after(pairs, comp_png)
+
+        # ── Save before/after comparison table ─────────────────────────
+        import csv as _csv
+        comp_csv = comparison_dir / "comparison_table.csv"
+        _fields = [
+            "pair", "source", "line", "ref_mixer", "tgt_mixer",
+            "dx_pix_before", "dy_pix_before", "dx_pix_after", "dy_pix_after",
+            "az_before_deg", "el_before_deg", "az_after_deg", "el_after_deg",
+            "sigma_az_before", "sigma_el_before", "sigma_az_after", "sigma_el_after",
+            "offset_mag_before_pix", "offset_mag_after_pix",
+            "improvement_pix",
+        ]
+        with comp_csv.open("w", newline="", encoding="utf-8") as fh:
+            w = _csv.DictWriter(fh, fieldnames=_fields)
+            w.writeheader()
+            for p in pairs:
+                b = p["res_before"]
+                a = p["res_after"]
+                dx_b, dy_b = float(b.get("dx_pix", 0)), float(b.get("dy_pix", 0))
+                dx_a, dy_a = float(a.get("dx_pix", 0)), float(a.get("dy_pix", 0))
+                mag_b = np.sqrt(dx_b**2 + dy_b**2)
+                mag_a = np.sqrt(dx_a**2 + dy_a**2)
+                w.writerow({
+                    "pair": p["label"],
+                    "source": b.get("source", ""),
+                    "line": b.get("line", ""),
+                    "ref_mixer": b.get("ref_mixer", ""),
+                    "tgt_mixer": b.get("tgt_mixer", ""),
+                    "dx_pix_before": f"{dx_b:.3f}",
+                    "dy_pix_before": f"{dy_b:.3f}",
+                    "dx_pix_after": f"{dx_a:.3f}",
+                    "dy_pix_after": f"{dy_a:.3f}",
+                    "az_before_deg": f"{float(b.get('az_deg', 0)):.6f}",
+                    "el_before_deg": f"{float(b.get('el_deg', 0)):.6f}",
+                    "az_after_deg": f"{float(a.get('az_deg', 0)):.6f}",
+                    "el_after_deg": f"{float(a.get('el_deg', 0)):.6f}",
+                    "sigma_az_before": f"{float(b.get('sigma_az_deg', 0)):.6e}",
+                    "sigma_el_before": f"{float(b.get('sigma_el_deg', 0)):.6e}",
+                    "sigma_az_after": f"{float(a.get('sigma_az_deg', 0)):.6e}",
+                    "sigma_el_after": f"{float(a.get('sigma_el_deg', 0)):.6e}",
+                    "offset_mag_before_pix": f"{mag_b:.3f}",
+                    "offset_mag_after_pix": f"{mag_a:.3f}",
+                    "improvement_pix": f"{mag_b - mag_a:.3f}",
+                })
+        print(f"  Comparison table saved: {comp_csv.name}")
 
     print(f"Comparison figures saved to: {comparison_dir}")
 
