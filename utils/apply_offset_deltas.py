@@ -75,7 +75,11 @@ def read_deltas(path: Path) -> dict[str, tuple[float, float, float, float]]:
             az_value = row.get("mean_az_deg")
             el_value = row.get("mean_el_deg")
             if az_value in (None, ""):
+                az_value = row.get("residual_az_deg")
+            if az_value in (None, ""):
                 az_value = row.get("sum_az_deg", 0.0)
+            if el_value in (None, ""):
+                el_value = row.get("residual_el_deg")
             if el_value in (None, ""):
                 el_value = row.get("sum_el_deg", 0.0)
 
