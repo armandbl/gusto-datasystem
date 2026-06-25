@@ -34,6 +34,11 @@ def main() -> None:
     parser.add_argument("--vmax", type=float, default=0.0, help="Maximum velocity for -l")
     parser.add_argument("--beam", type=float, default=1.0, help="Beam FWHM in arcmin for -Beam")
     parser.add_argument(
+        "-k", "--kernel", default="gaussbessel",
+        choices=["gaussbessel", "gauss", "nearest"],
+        help="Gridding kernel (default: gaussbessel)",
+    )
+    parser.add_argument(
         "-j", "--cpus", type=int, default=None,
         help="Number of CPU workers for the gridding kernel (passed to GUSTOgridder -j)",
     )
@@ -57,6 +62,10 @@ def main() -> None:
 
     py_exe = args.python or "python"
 
+    print(f"Gridding {args.source}: kernel={args.kernel}, beam={args.beam}', "
+          f"v=[{args.vmin},{args.vmax}], cpus={args.cpus or 'auto'}",
+          flush=True)
+
     # GUSTOgridder concatenates dir_write + ofile, so use a leading slash to place
     # outputs under Data/level2/<source>/<n>th run/.
     # TODO Change into path for subcube. 
@@ -66,6 +75,8 @@ def main() -> None:
     base_args = [
         "-s",
         args.source,
+        "-k",
+        args.kernel,
         "-l",
         str(args.vmin),
         str(args.vmax),
