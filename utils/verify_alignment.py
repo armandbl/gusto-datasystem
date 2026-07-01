@@ -43,7 +43,6 @@ from measure_mixer_crosscorr import (  # type: ignore[import-not-found]
     header_float,
     load_cube,
     measure_shift_integer,
-    moment0_header,
     parse_line_and_mixer_from_name,
     pixel_offset_to_azel,
     save_correlation_png,

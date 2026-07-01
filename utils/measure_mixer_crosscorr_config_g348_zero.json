@@ -1,0 +1,12 @@
+{
+  "data_root": "Data/level2",
+  "offsets_file": "src/GUSTO_Pipeline/calib/offsets_G348_zero_theory.txt",
+  "run": "obj4_zero",
+  "auto_detect_observer": true,
+  "sources": ["G348"],
+  "delta_output": "Data/level2/crosscorr_deltas_G348_zero.csv",
+  "line_targets": {
+    "CII": {"target_mixer": 8, "mixers": [5]},
+    "NII": {"target_mixer": 3, "mixers": [2, 6]}
+  }
+}

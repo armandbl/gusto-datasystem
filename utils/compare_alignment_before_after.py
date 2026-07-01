@@ -67,17 +67,15 @@ DEFAULT_LINE_TARGETS: dict[str, dict[str, object]] = {
 # ---------------------------------------------------------------------------
 
 from measure_mixer_crosscorr import (  # type: ignore[import-not-found]  # noqa: E402
+    _cube_center_galactic,
     build_moment0_map,
     fmt_uncertainty,
-    galactic_offset_to_azel,
     get_observer_metadata,
     header_float,
     load_cube,
     measure_shift_integer,
     measure_shift_with_uncertainty,
-    parse_line_and_mixer_from_name,
     pixel_offset_to_azel,
-    prep_map,
     propagate_pixel_uncertainty_to_azel,
     select_cube,
 )
@@ -387,8 +385,10 @@ def process_one_mixer_pair(
     dx_pix = -float(lag_x)
     dy_pix = -float(lag_y)
 
-    # Coordinate conversion
-    obs = get_observer_metadata(config, data_root, source, line)
+    # Coordinate conversion — use subcube spatial centre, not CRVAL
+    ref_glon, ref_glat = _cube_center_galactic(ref_header, ref_cube.shape)
+    obs = get_observer_metadata(config, data_root, source, line,
+                                ref_glon=ref_glon, ref_glat=ref_glat)
     az_deg, el_deg, coord_method = pixel_offset_to_azel(
         dx_pix, dy_pix, ref_header, obs
     )
@@ -400,13 +400,16 @@ def process_one_mixer_pair(
         dx_pix=dx_pix, dy_pix=dy_pix,
     )
 
-    # Systematic uncertainty floor (same as process_job)
-    _sys_floor_arcsec = float(config.get("systematic_floor_arcsec", 15.0))
+    # --- Systematic uncertainty floor ---
+    # Optional: add a configurable floor (arcsec) for unmodeled systematics.
+    # Default 0.0 — only set when an empirical upper bound is measured.
+    _sys_floor_arcsec = float(config.get("systematic_floor_arcsec", 0.0))
     _sys_floor_deg = _sys_floor_arcsec / 3600.0
-    if np.isfinite(sigma_az_deg):
-        sigma_az_deg = float(np.sqrt(sigma_az_deg ** 2 + _sys_floor_deg ** 2))
-    if np.isfinite(sigma_el_deg):
-        sigma_el_deg = float(np.sqrt(sigma_el_deg ** 2 + _sys_floor_deg ** 2))
+    if _sys_floor_deg > 0:
+        if np.isfinite(sigma_az_deg):
+            sigma_az_deg = float(np.sqrt(sigma_az_deg ** 2 + _sys_floor_deg ** 2))
+        if np.isfinite(sigma_el_deg):
+            sigma_el_deg = float(np.sqrt(sigma_el_deg ** 2 + _sys_floor_deg ** 2))
 
     cdelt1 = header_float(ref_header, "CDELT1", 0.0)
     cdelt2 = header_float(ref_header, "CDELT2", 0.0)

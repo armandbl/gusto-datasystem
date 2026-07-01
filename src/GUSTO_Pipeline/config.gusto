@@ -1,6 +1,6 @@
 path = /media/armand/SSD_ARMAND/gusto-datasystem/Data
 band = [1, 2]
-cpus = 18
+cpus = 10
 scanid = [4000, 8000]
 level = 1.0
 source = G337

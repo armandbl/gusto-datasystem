@@ -226,7 +226,7 @@ def processL09(params, verbose=True):
     return dfile
 
 
-def getMixerOffsets(band, mixers, offsetfile=None, verbose=False, args=None):
+def getMixerOffsets(band, mixers, offsetfile=None, args=None):
     """Function retrieving the GUSTO on-sky mixer offsets from file.
 
     usage:
@@ -264,35 +264,6 @@ def getMixerOffsets(band, mixers, offsetfile=None, verbose=False, args=None):
             selected_offset = int(np.argwhere(cmixer_mask).flatten()[-1])
 
         offsets.append(selected_offset)
-
-    # Apply zero-referencing if requested
-    if args is not None and getattr(args, 'zero_reference', False):
-        if len(offsets) > 0:
-            # Get the offset data for all requested mixers
-            mixer_data = data[offsets]
-
-            # Zero-reference each band against a fixed mixer anchor so the
-            # reference is stable and independent for the two arrays.
-            reference_mixers = {1: 'B1M3', 2: 'B2M8'}
-            ref_label = reference_mixers.get(int(band))
-
-            if ref_label in mixer_data['mxpix']:
-                ref_idx = np.argwhere(mixer_data['mxpix'] == ref_label).flatten()[0]
-            else:
-                # Fall back to the first requested mixer if the configured
-                # reference is not present in this subset.
-                ref_idx = 0
-
-            ref_az = mixer_data['az'][ref_idx]
-            ref_el = mixer_data['el'][ref_idx]
-
-            zero_referenced = np.zeros(len(mixer_data), dtype=[('mxpix', 'U4'), ('az', '<f8'), ('el', '<f8'), ('type', 'U16')])
-            zero_referenced['mxpix'] = mixer_data['mxpix']
-            zero_referenced['az'] = mixer_data['az'] - ref_az
-            zero_referenced['el'] = mixer_data['el'] - ref_el
-            zero_referenced['type'] = mixer_data['type']
-
-            return zero_referenced
 
     #print(data[offsets].flatten())
     return data[offsets].flatten()
