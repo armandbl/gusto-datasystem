@@ -116,7 +116,7 @@ def processL09(params, verbose=True):
     # insert the coordinate corrections
     # Note: the coordinate correction is not yet final
     # and will be (iteratively) improved
-    mxoffs = getMixerOffsets(band, umixers, verbose=verbose, args=args)
+    mxoffs = getMixerOffsets(band, umixers, args=args)
     
     for i, mix in enumerate(umixers):
         azoff = mxoffs['az'][i]
@@ -231,7 +231,7 @@ def getMixerOffsets(band, mixers, offsetfile=None, args=None):
 
     usage:
     ------
-    aa = getMixerOffsets(1, [3, 5, 8], verbose=True)
+    aa = getMixerOffsets(1, [3, 5, 8])
     print(aa['az'])     # prints: [0.06079  0.062584 0.093356]
     """
 

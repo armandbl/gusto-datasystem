@@ -4,8 +4,7 @@
 # Runs the full before/after cycle: zero theory → measure → correct → verify.
 #
 # Usage:
-#   bash Perso/run_zero_theory_alignment.sh G337
-#   bash Perso/run_zero_theory_alignment.sh G348
+#   bash utils/run_zero_theory_alignment.sh G337 && bash utils/run_zero_theory_alignment.sh G348
 #
 # All outputs go under alignment_zero/ — no existing offsets or results touched.
 # ---------------------------------------------------------------------------

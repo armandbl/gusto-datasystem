@@ -352,9 +352,6 @@ def main() -> None:
             # Compute Galactic offsets for annotation
             cdelt1 = header_float(ref_header, "CDELT1", 0.0)
             cdelt2 = header_float(ref_header, "CDELT2", 0.0)
-            dlon_deg = metrics["dx_pix"] * cdelt1 if cdelt1 != 0.0 else None
-            dlat_deg = metrics["dy_pix"] * cdelt2 if cdelt2 != 0.0 else None
-
             corr_png = compare_dir / f"crosscorr_{source}_{line}_M{ref_mx}_vs_M{tgt_mx}.png"
             save_correlation_png(
                 metrics["corr"],
@@ -364,8 +361,6 @@ def main() -> None:
                 ),
                 dx_pix=metrics["dx_pix"],
                 dy_pix=metrics["dy_pix"],
-                dlon_deg=dlon_deg,
-                dlat_deg=dlat_deg,
             )
 
             pass_pix = bool(metrics["offset_pix"] <= args.threshold_pix)
